@@ -13,7 +13,12 @@ from app.tasks.celery_app import celery_app
 def run_course_creation_job(self: Task, job_id: int) -> None:
     with SessionLocal() as db:
         job = db.get(CourseJob, job_id)
-        assert job is not None, f"CourseJob {job_id} not found"
+        if job is None:
+            # `assert` is stripped under -O/PYTHONOPTIMIZE, so a missing row
+            # (a genuine caller bug — Task 11 only enqueues ids it just
+            # inserted) must be an explicit, non-optimizable failure rather
+            # than a debug-mode-only invariant.
+            raise ValueError(f"CourseJob {job_id} not found")
 
         job.status = "running"
         job.updated_at = datetime.now(timezone.utc)
