@@ -1,0 +1,333 @@
+import uuid
+from contextlib import ExitStack
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.db import SessionLocal
+from app.models.course import Course, Module, Chapter, Concept, ConceptEdge
+from app.agents.course_creation.nodes.persist_course import persist_course
+from app.agents.course_creation.nodes.generate_outline import ModuleDraft
+from app.agents.course_creation.nodes.generate_chapters import ChapterDraft
+from app.agents.course_creation.nodes.build_concept_graph import (
+    ConceptDraft,
+    ConceptGraphResponse,
+)
+from app.agents.course_creation.graph import (
+    MAX_RETRIES_PER_NODE,
+    CourseGenerationError,
+    build_course_creation_graph,
+)
+
+
+def test_persist_course_writes_full_tree():
+    state = {
+        "job_id": 1, "topic_raw": "TypeScript", "topic_slug": "ts-persist-test",
+        "topic_embedding": [0.0] * 1024, "existing_course_id": None,
+        "modules": [{"title": "M1", "objective": "o", "order": 1,
+                     "chapters": [{"title": "C1", "objective": "o", "order": 1}]}],
+        "concepts": [{"name": "X", "chapter_title": "C1"}],
+        "concept_edges": [], "error": None,
+    }
+    with SessionLocal() as db:
+        result = persist_course(state, db)
+        db.commit()
+
+    assert result["error"] is None
+    with SessionLocal() as db:
+        course = db.query(Course).filter_by(topic_slug="ts-persist-test").one()
+        assert db.query(Module).filter_by(course_id=course.id).count() == 1
+        module = db.query(Module).filter_by(course_id=course.id).one()
+        assert db.query(Chapter).filter_by(module_id=module.id).count() == 1
+        assert db.query(Concept).filter_by(course_id=course.id).count() == 1
+
+
+def test_persist_course_resolves_string_keys_to_real_fks():
+    """Task 8 emits concepts/edges keyed by *name*/*chapter_title* strings;
+    persist_course must resolve them to real DB ids."""
+    state = {
+        "job_id": 2, "topic_raw": "Rust", "topic_slug": "rust-fk-test",
+        "topic_embedding": [0.1] * 1024, "existing_course_id": None,
+        "modules": [
+            {"title": "M1", "objective": "o", "order": 1, "chapters": [
+                {"title": "Ownership", "objective": "o", "order": 1},
+                {"title": "Borrowing", "objective": "o", "order": 2},
+            ]},
+        ],
+        "concepts": [
+            {"name": "Move semantics", "chapter_title": "Ownership"},
+            {"name": "Borrow checker", "chapter_title": "Borrowing"},
+        ],
+        "concept_edges": [
+            {"concept_name": "Borrow checker", "prerequisite_name": "Move semantics"},
+        ],
+        "error": None,
+    }
+    with SessionLocal() as db:
+        result = persist_course(state, db)
+        db.commit()
+
+    assert result["error"] is None
+    assert result["existing_course_id"] is not None
+
+    with SessionLocal() as db:
+        course = db.query(Course).filter_by(topic_slug="rust-fk-test").one()
+        assert result["existing_course_id"] == course.id
+
+        ownership = db.query(Chapter).filter_by(title="Ownership").one()
+        borrowing = db.query(Chapter).filter_by(title="Borrowing").one()
+
+        move = db.query(Concept).filter_by(course_id=course.id, name="Move semantics").one()
+        borrow = db.query(Concept).filter_by(course_id=course.id, name="Borrow checker").one()
+        # string chapter_title resolved to the correct chapter row
+        assert move.chapter_id == ownership.id
+        assert borrow.chapter_id == borrowing.id
+
+        edge = db.query(ConceptEdge).one()
+        assert edge.concept_id == borrow.id
+        assert edge.prerequisite_concept_id == move.id
+
+
+def test_persist_course_is_atomic_on_bad_reference():
+    """An edge naming a concept that does not exist must abort the whole write:
+    no course, no modules, no chapters left behind."""
+    state = {
+        "job_id": 3, "topic_raw": "Go", "topic_slug": "go-atomic-test",
+        "topic_embedding": [0.2] * 1024, "existing_course_id": None,
+        "modules": [{"title": "M1", "objective": "o", "order": 1,
+                     "chapters": [{"title": "C1", "objective": "o", "order": 1}]}],
+        "concepts": [{"name": "Goroutines", "chapter_title": "C1"}],
+        "concept_edges": [
+            {"concept_name": "Goroutines", "prerequisite_name": "Does Not Exist"},
+        ],
+        "error": None,
+    }
+    with SessionLocal() as db:
+        result = persist_course(state, db)
+        db.commit()
+
+    assert result["error"] is not None
+
+    with SessionLocal() as db:
+        assert db.query(Course).filter_by(topic_slug="go-atomic-test").count() == 0
+        assert db.query(Module).count() == 0
+        assert db.query(Chapter).count() == 0
+        assert db.query(Concept).count() == 0
+
+
+# --------------------------------------------------------------------------
+# Full-graph integration
+# --------------------------------------------------------------------------
+
+
+#: pgvector's cosine_distance is undefined for the zero vector, so the fake
+#: embedding must be non-zero for the dedup path to be exercised at all.
+FAKE_EMBEDDING = [1.0] + [0.0] * 1023
+
+
+def _patched_graph(outline, chapters, concept_graph, canonical_title,
+                   embedding=FAKE_EMBEDDING):
+    """Patch every LLM/embedding boundary the graph touches. No real API calls."""
+
+    outline_model = MagicMock()
+    outline_model.with_structured_output.return_value.invoke.return_value = outline
+    chapters_model = MagicMock()
+    chapters_model.with_structured_output.return_value.invoke.return_value = chapters
+    graph_model = MagicMock()
+    graph_model.with_structured_output.return_value.invoke.return_value = concept_graph
+
+    by_node = {
+        "generate_outline": outline_model,
+        "generate_chapters": chapters_model,
+        "build_concept_graph": graph_model,
+    }
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch("app.agents.course_creation.nodes.normalize_topic.embed",
+              return_value=embedding)
+    )
+    stack.enter_context(
+        patch("app.agents.course_creation.nodes.normalize_topic._canonicalize",
+              return_value=canonical_title)
+    )
+    for node in by_node:
+        stack.enter_context(
+            patch(f"app.agents.course_creation.nodes.{node}.get_chat_model",
+                  side_effect=lambda n: by_node[n])
+        )
+    return stack, by_node
+
+
+def _initial_state(job_id: int, topic_raw: str) -> dict:
+    return {
+        "job_id": job_id, "topic_raw": topic_raw, "topic_slug": None,
+        "topic_embedding": None, "existing_course_id": None,
+        "modules": None, "concepts": None, "concept_edges": None, "error": None,
+    }
+
+
+def test_full_graph_topic_to_persisted_course():
+    stack, _ = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[ChapterDraft(title="Intro", objective="o", order=1)],
+        concept_graph=ConceptGraphResponse(
+            concepts=[ConceptDraft(name="Basics Concept", chapter_title="Intro")],
+            edges=[],
+        ),
+        canonical_title="Full Graph Test Topic",
+    )
+    with stack:
+        app_graph = build_course_creation_graph()
+        final_state = app_graph.invoke(
+            _initial_state(999, "full graph test topic"),
+            config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+        )
+
+    assert final_state["error"] is None
+    assert final_state["existing_course_id"] is not None
+
+    with SessionLocal() as db:
+        course = db.query(Course).filter_by(topic_slug="full-graph-test-topic").one()
+        assert final_state["existing_course_id"] == course.id
+        module = db.query(Module).filter_by(course_id=course.id).one()
+        assert module.title == "Basics"
+        chapter = db.query(Chapter).filter_by(module_id=module.id).one()
+        assert chapter.title == "Intro"
+        concept = db.query(Concept).filter_by(course_id=course.id).one()
+        assert concept.name == "Basics Concept"
+        assert concept.chapter_id == chapter.id
+
+
+def test_full_graph_short_circuits_on_existing_course():
+    """normalize_topic finding a near-duplicate must end the run without
+    generating or persisting anything new."""
+    with SessionLocal() as db:
+        existing = persist_course(
+            {
+                "job_id": 0, "topic_raw": "Dup", "topic_slug": "dup-course",
+                "topic_embedding": FAKE_EMBEDDING, "existing_course_id": None,
+                "modules": [], "concepts": [], "concept_edges": [], "error": None,
+            },
+            db,
+        )
+        db.commit()
+    existing_id = existing["existing_course_id"]
+
+    stack, by_node = _patched_graph(
+        outline=[], chapters=[],
+        concept_graph=ConceptGraphResponse(concepts=[], edges=[]),
+        canonical_title="Should Not Be Used",
+    )
+    with stack:
+        app_graph = build_course_creation_graph()
+        final_state = app_graph.invoke(
+            _initial_state(1000, "dup"),
+            config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+        )
+
+    assert final_state["existing_course_id"] == existing_id
+    by_node["generate_outline"].with_structured_output.assert_not_called()
+    with SessionLocal() as db:
+        assert db.query(Course).count() == 1
+
+
+# --------------------------------------------------------------------------
+# Retry cap
+#
+# The plan's original `_route_after_validate` incremented `_retry_counts` by
+# mutating the state dict inside the conditional-edge function. Verified
+# against langgraph 1.2.11: those mutations are discarded (the state mapping is
+# rebuilt from channel values each step), so the cap never tripped and the
+# graph looped until GraphRecursionError. Counting now happens in the
+# validate_course node and is returned as a state update. These tests pin that.
+# --------------------------------------------------------------------------
+
+
+def test_retry_cap_trips_after_exactly_max_retries():
+    """A module that never gets chapters must fail validation, retry
+    generate_chapters exactly MAX_RETRIES_PER_NODE times, then raise."""
+    stack, by_node = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[],  # always empty -> validate_course always errors
+        concept_graph=ConceptGraphResponse(concepts=[], edges=[]),
+        canonical_title="Retry Cap Test",
+    )
+    with stack:
+        app_graph = build_course_creation_graph()
+        with pytest.raises(CourseGenerationError, match="exhausted retries"):
+            app_graph.invoke(
+                _initial_state(1001, "retry cap test"),
+                config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+            )
+
+        chapters_invoke = by_node["generate_chapters"].with_structured_output.return_value.invoke
+        # 1 initial attempt + MAX_RETRIES_PER_NODE retries, then give up.
+        assert chapters_invoke.call_count == 1 + MAX_RETRIES_PER_NODE
+
+    with SessionLocal() as db:
+        assert db.query(Course).count() == 0
+
+
+def test_retry_count_persists_across_graph_cycles():
+    """Directly pin the failure mode the plan's router had: the counter must
+    actually increment across cycles rather than resetting each step."""
+    from app.agents.course_creation import graph as graph_mod
+
+    observed: list[dict] = []
+    real_router = graph_mod._route_after_validate
+
+    def spy(state):
+        observed.append(dict(state.get("retry_counts") or {}))
+        return real_router(state)
+
+    stack, _ = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[],
+        concept_graph=ConceptGraphResponse(concepts=[], edges=[]),
+        canonical_title="Retry Count Persist",
+    )
+    with stack, patch.object(graph_mod, "_route_after_validate", spy):
+        app_graph = build_course_creation_graph()
+        with pytest.raises(CourseGenerationError):
+            app_graph.invoke(
+                _initial_state(1002, "retry count persist"),
+                config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+            )
+
+    counts = [c.get("generate_chapters", 0) for c in observed]
+    assert counts == [1, 2, 3], f"retry counter did not persist across cycles: {counts}"
+
+
+def test_recoverable_failure_retries_then_succeeds():
+    """One bad concept-graph response followed by a good one must recover
+    without tripping the cap."""
+    bad = ConceptGraphResponse(
+        concepts=[ConceptDraft(name="A", chapter_title="Intro")],
+        edges=[{"concept_name": "A", "prerequisite_name": "Ghost"}],
+    )
+    good = ConceptGraphResponse(
+        concepts=[ConceptDraft(name="A", chapter_title="Intro")], edges=[]
+    )
+    stack, by_node = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[ChapterDraft(title="Intro", objective="o", order=1)],
+        concept_graph=good,
+        canonical_title="Recoverable Retry",
+    )
+    with stack:
+        by_node["build_concept_graph"].with_structured_output.return_value.invoke.side_effect = [
+            bad,
+            good,
+        ]
+        app_graph = build_course_creation_graph()
+        final_state = app_graph.invoke(
+            _initial_state(1003, "recoverable retry"),
+            config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+        )
+
+    assert final_state["error"] is None
+    assert final_state["retry_counts"] == {"build_concept_graph": 1}
+    with SessionLocal() as db:
+        course = db.query(Course).filter_by(topic_slug="recoverable-retry").one()
+        assert db.query(Concept).filter_by(course_id=course.id).count() == 1
