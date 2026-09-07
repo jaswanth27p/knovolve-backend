@@ -7,5 +7,8 @@ from app.db import SessionLocal
 def clean_db():
     yield
     with SessionLocal() as s:
-        s.execute(text("TRUNCATE refresh_tokens, users RESTART IDENTITY CASCADE"))
+        s.execute(text(
+            "TRUNCATE refresh_tokens, users, concept_edges, concepts, chapters, "
+            "modules, course_jobs, courses RESTART IDENTITY CASCADE"
+        ))
         s.commit()
