@@ -239,3 +239,51 @@ GENERATE_SECTION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# generate_chapter_section.generate_chapter_section
+# ---------------------------------------------------------------------------
+# `examples` non-empty for "teaching" sections is enforced in code (a
+# corrective re-invoke, then a hard failure) rather than trusted to the
+# prompt alone — see generate_chapter_section's retry logic — but the prompt
+# states the requirement up front so the corrective path is rarely needed.
+GENERATE_CHAPTER_SECTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert instructional content writer for Knovolve, "
+            "an adaptive learning platform. Given one content section from a "
+            "chapter (its heading, objective, and kind), write its full "
+            "teaching content.\n\n"
+            "Requirements:\n"
+            "- `body_markdown`: well-structured markdown prose. Use fenced "
+            "code blocks (```language ... ```) when the topic is technical "
+            "or code-related; do not force code blocks into non-technical "
+            "topics.\n"
+            "- `examples`: each is a worked, illustrative application of the "
+            "section's concept — a `prompt` (a concrete question, scenario, "
+            "or problem) and a `walkthrough` (step-by-step reasoning to "
+            "resolve it). This generalizes across any subject: a coding "
+            "section's example walks through a code problem, a history "
+            "section's walks through a case where the concept applied, a "
+            "language section's walks through a sentence using the rule. "
+            "If `kind` is \"teaching\", you MUST include at least one "
+            "example. If `kind` is \"intro\", examples may be empty.\n"
+            "- `diagram_spec`: OPTIONAL. Only include one when a "
+            "flowchart/hierarchy/dependency graph genuinely clarifies the "
+            "concept (e.g. process steps, a decision tree, a class/data "
+            "structure, a dependency chain) — omit it (null) for purely "
+            "descriptive content where a diagram would add nothing. When "
+            "included, `nodes` are `{{id, label}}` and `edges` are "
+            "`{{source, target, label?}}` referencing node ids.",
+        ),
+        (
+            "human",
+            "Chapter: {chapter_title} — {chapter_objective}\n"
+            "Section heading: {heading}\n"
+            "Section objective: {objective}\n"
+            "Section kind: {kind}\n\n"
+            "Write this section's full content.",
+        ),
+    ]
+)
