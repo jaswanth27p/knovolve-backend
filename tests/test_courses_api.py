@@ -248,3 +248,40 @@ def test_retry_attaches_course_created_elsewhere():
         assert job.status == "succeeded"
         assert job.course_id == course_id
         assert job.error is None
+
+
+from app.models.enrollment import UserCourse
+
+
+def test_get_public_courses_requires_auth():
+    resp = client.get("/courses")
+    assert resp.status_code == 401
+
+
+def test_get_public_courses_excludes_tracked():
+    headers = _auth_headers()
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    from app.models.course import Course, Module
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        c1 = Course(topic_slug="pub-1", topic_raw="pub 1",
+                    topic_embedding=[0.0] * 1024, created_at=now)
+        c2 = Course(topic_slug="pub-2", topic_raw="pub 2",
+                    topic_embedding=[0.0] * 1024, created_at=now)
+        db.add_all([c1, c2])
+        db.commit()
+        db.add(Module(course_id=c1.id, title="M", objective="o", order=1))
+        db.add(Module(course_id=c2.id, title="M", objective="o", order=1))
+        db.commit()
+
+    # User opens pub-2 -> it becomes tracked -> must be excluded.
+    client.get("/courses/pub-2", headers=headers)
+
+    resp = client.get("/courses", headers=headers)
+    body = resp.json()
+    slugs = {c["topic_slug"] for c in body}
+    assert "pub-1" in slugs
+    assert "pub-2" not in slugs
+    row = next(c for c in body if c["topic_slug"] == "pub-1")
+    assert row["module_count"] == 1

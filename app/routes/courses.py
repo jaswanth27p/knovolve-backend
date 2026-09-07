@@ -15,7 +15,8 @@ from app.enroll import touch_enrollment
 from app.auth.dependencies import get_current_user
 from app.models.course import Course, CourseJob, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
-from app.schemas.course import CreateCourseRequest, CourseJobResponse
+from app.models.enrollment import UserCourse
+from app.schemas.course import CreateCourseRequest, CourseJobResponse, PublicCourseResponse
 from app.agents.course_creation.nodes.normalize_topic import (
     _canonicalize,
     _slugify,
@@ -193,6 +194,27 @@ def retry_job(job_id: int, response: Response, db: Session = Depends(get_session
     # Same .delay blind-spot as create_course above.
     run_course_creation_job.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return CourseJobResponse(status="pending", job_id=job.id)
+
+@router.get("", response_model=list[PublicCourseResponse])
+def list_public_courses(db: Session = Depends(get_session), user=Depends(get_current_user)):
+    tracked_ids = set(
+        row.course_id for row in db.query(UserCourse).filter_by(user_id=user.id).all()
+    )
+    courses = db.query(Course).order_by(Course.created_at.desc()).all()
+    result = []
+    for course in courses:
+        if course.id in tracked_ids:
+            continue
+        modules = db.query(Module).filter_by(course_id=course.id).all()
+        chapter_count = sum(
+            db.query(Chapter).filter_by(module_id=m.id).count() for m in modules
+        )
+        result.append(PublicCourseResponse(
+            id=course.id, topic_slug=course.topic_slug, topic_raw=course.topic_raw,
+            module_count=len(modules), chapter_count=chapter_count,
+        ))
+    return result
+
 
 @router.get("/{slug}")
 def get_course(slug: str, db: Session = Depends(get_session), user=Depends(get_current_user)):

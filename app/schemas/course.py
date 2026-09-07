@@ -31,3 +31,11 @@ class DashboardResponse(BaseModel):
     in_progress_count: int
     completed_count: int
     total_count: int
+
+
+class PublicCourseResponse(BaseModel):
+    id: int
+    topic_slug: str
+    topic_raw: str
+    module_count: int
+    chapter_count: int
