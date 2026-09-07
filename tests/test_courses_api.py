@@ -250,9 +250,6 @@ def test_retry_attaches_course_created_elsewhere():
         assert job.error is None
 
 
-from app.models.enrollment import UserCourse
-
-
 def test_get_public_courses_requires_auth():
     resp = client.get("/courses")
     assert resp.status_code == 401

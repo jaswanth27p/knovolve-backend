@@ -16,7 +16,8 @@ def _register(email: str) -> dict:
     return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 
-def _make_course(slug: str, with_chapter: bool = True, content_ready: bool = False):
+def _make_course(slug: str, with_chapter: bool = True, content_ready: bool = False,
+                 num_chapters: int = 1):
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
         course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 1024, created_at=now)
@@ -25,9 +26,9 @@ def _make_course(slug: str, with_chapter: bool = True, content_ready: bool = Fal
         module = Module(course_id=course.id, title="M", objective="o", order=1)
         db.add(module)
         db.commit()
-        chapter = None
-        if with_chapter:
-            chapter = Chapter(module_id=module.id, title="C", objective="o", order=1)
+        count = num_chapters if with_chapter else 0
+        for i in range(count):
+            chapter = Chapter(module_id=module.id, title="C", objective="o", order=i + 1)
             db.add(chapter)
             db.commit()
             if content_ready:
@@ -82,6 +83,48 @@ def test_me_courses_content_ready_true():
     resp = client.get("/me/courses", headers=headers)
     row = next(r for r in resp.json() if r["topic_slug"] == "me-b-1")
     assert row["content_ready"] is True
+
+
+def test_me_courses_content_ready_two_chapters_all_ready():
+    headers = _auth_for("me-f@example.com")
+    user_id = _get_user_id("me-f@example.com")
+    c = _make_course("me-f-1", content_ready=True, num_chapters=2)
+    _enroll(user_id, c)
+    resp = client.get("/me/courses", headers=headers)
+    row = next(r for r in resp.json() if r["topic_slug"] == "me-f-1")
+    assert row["chapter_count"] == 2
+    assert row["content_ready"] is True
+
+
+def test_me_courses_content_ready_partial_is_false():
+    headers = _auth_for("me-g@example.com")
+    user_id = _get_user_id("me-g@example.com")
+    c = _make_course("me-g-1", num_chapters=2)
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = db.query(Course).filter_by(topic_slug="me-g-1").one()
+        module = db.query(Module).filter_by(course_id=course.id).one()
+        chapter = db.query(Chapter).filter_by(module_id=module.id).order_by(Chapter.order).first()
+        db.add(ChapterContent(chapter_id=chapter.id, version=1, scope="global",
+                              status="ready", outline=[],
+                              created_at=now, updated_at=now))
+        db.commit()
+    _enroll(user_id, c)
+    resp = client.get("/me/courses", headers=headers)
+    row = next(r for r in resp.json() if r["topic_slug"] == "me-g-1")
+    assert row["chapter_count"] == 2
+    assert row["content_ready"] is False
+
+
+def test_me_courses_content_ready_no_chapters_is_false():
+    headers = _auth_for("me-h@example.com")
+    user_id = _get_user_id("me-h@example.com")
+    c = _make_course("me-h-1", with_chapter=False)
+    _enroll(user_id, c)
+    resp = client.get("/me/courses", headers=headers)
+    row = next(r for r in resp.json() if r["topic_slug"] == "me-h-1")
+    assert row["chapter_count"] == 0
+    assert row["content_ready"] is False
 
 
 def test_me_dashboard_counts():
