@@ -11,6 +11,7 @@ from app.observability import (
     setup_tracing,
 )
 from app.routes.courses import router as courses_router
+from app.routes.me import router as me_router
 
 setup_tracing()
 setup_logging()
@@ -27,6 +28,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(courses_router)
+app.include_router(me_router)
 
 instrument_static()
 instrument_fastapi(app)

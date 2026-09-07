@@ -1,0 +1,126 @@
+from datetime import datetime, timezone
+from fastapi.testclient import TestClient
+from app.main import app
+from app.db import SessionLocal
+from app.models.course import Course, Module, Chapter
+from app.models.enrollment import UserCourse
+from app.models.chapter_content import ChapterContent
+from app.models.user import User
+
+client = TestClient(app)
+
+
+def _register(email: str) -> dict:
+    client.post("/auth/register", json={"email": email, "password": "pw123456"})
+    tokens = client.post("/auth/login", json={"email": email, "password": "pw123456"}).json()
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
+
+
+def _make_course(slug: str, with_chapter: bool = True, content_ready: bool = False):
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 1024, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        chapter = None
+        if with_chapter:
+            chapter = Chapter(module_id=module.id, title="C", objective="o", order=1)
+            db.add(chapter)
+            db.commit()
+            if content_ready:
+                db.add(ChapterContent(chapter_id=chapter.id, version=1, scope="global",
+                                      status="ready", outline=[],
+                                      created_at=now, updated_at=now))
+                db.commit()
+        return course.id
+
+
+def _enroll(user_id: int, course_id: int):
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        db.add(UserCourse(user_id=user_id, course_id=course_id, enrolled_at=now, last_opened_at=now))
+        db.commit()
+
+
+def _get_user_id(email: str) -> int:
+    with SessionLocal() as db:
+        return db.query(User).filter_by(email=email).one().id
+
+
+def test_me_courses_requires_auth():
+    resp = client.get("/me/courses")
+    assert resp.status_code == 401
+
+
+def test_me_courses_returns_only_own():
+    headers = _auth_for("me-a@example.com")
+    user_id = _get_user_id("me-a@example.com")
+    c1 = _make_course("me-a-1")
+    c2 = _make_course("me-a-2")
+    _enroll(user_id, c1)
+    _enroll(user_id, c2)
+
+    resp = client.get("/me/courses", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    slugs = {r["topic_slug"] for r in body}
+    assert slugs == {"me-a-1", "me-a-2"}
+    row = next(r for r in body if r["topic_slug"] == "me-a-1")
+    assert row["module_count"] == 1
+    assert row["chapter_count"] == 1
+    assert row["content_ready"] is False
+
+
+def test_me_courses_content_ready_true():
+    headers = _auth_for("me-b@example.com")
+    user_id = _get_user_id("me-b@example.com")
+    c = _make_course("me-b-1", content_ready=True)
+    _enroll(user_id, c)
+    resp = client.get("/me/courses", headers=headers)
+    row = next(r for r in resp.json() if r["topic_slug"] == "me-b-1")
+    assert row["content_ready"] is True
+
+
+def test_me_dashboard_counts():
+    headers = _auth_for("me-c@example.com")
+    user_id = _get_user_id("me-c@example.com")
+    _enroll(user_id, _make_course("me-c-1", content_ready=True))
+    _enroll(user_id, _make_course("me-c-2"))
+
+    resp = client.get("/me/dashboard", headers=headers)
+    body = resp.json()
+    assert body["in_progress_count"] == 2
+    assert body["completed_count"] == 0
+    assert body["total_count"] == 2
+
+
+def test_delete_me_course_un_tracks_only():
+    headers_a = _auth_for("me-d-a@example.com")
+    headers_b = _auth_for("me-d-b@example.com")
+    uid_a = _get_user_id("me-d-a@example.com")
+    uid_b = _get_user_id("me-d-b@example.com")
+    c = _make_course("me-d-1")
+    _enroll(uid_a, c)
+    _enroll(uid_b, c)
+
+    resp = client.delete(f"/me/courses/{c}", headers=headers_a)
+    assert resp.status_code == 204
+    with SessionLocal() as db:
+        assert db.query(UserCourse).filter_by(user_id=uid_a, course_id=c).count() == 0
+        assert db.query(UserCourse).filter_by(user_id=uid_b, course_id=c).count() == 1
+
+
+def test_delete_me_course_404_when_not_tracked():
+    headers = _auth_for("me-e@example.com")
+    c = _make_course("me-e-1")
+    resp = client.delete(f"/me/courses/{c}", headers=headers)
+    assert resp.status_code == 404
+
+
+def _auth_for(email: str) -> dict:
+    client.post("/auth/register", json={"email": email, "password": "pw123456"})
+    tokens = client.post("/auth/login", json={"email": email, "password": "pw123456"}).json()
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
