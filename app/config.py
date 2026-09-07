@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     s3_bucket: str = "knovolve"
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
+    # Bound on how long the content-streaming endpoint tails Redis for a
+    # still-pending diagram after all section text has been delivered, so a
+    # dropped/never-publishing worker can't hang the HTTP connection forever.
+    diagram_stream_timeout_seconds: float = 120.0
 
     class Config:
         env_file = ".env"

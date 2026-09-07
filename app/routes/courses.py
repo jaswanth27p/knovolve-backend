@@ -1,12 +1,19 @@
+import json
 import logging
+import time
 from datetime import datetime, timezone
+from typing import Iterator
+import redis
 from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import inspect as sa_inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from app.config import settings
 from app.db import get_session
 from app.auth.dependencies import get_current_user
 from app.models.course import Course, CourseJob, Module, Chapter
+from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.schemas.course import CreateCourseRequest, CourseJobResponse
 from app.agents.course_creation.nodes.normalize_topic import (
     _canonicalize,
@@ -15,6 +22,8 @@ from app.agents.course_creation.nodes.normalize_topic import (
 )
 from app.llm.factory import embed
 from app.agents.course_creation.checkpoints import purge_checkpoints
+from app.agents.chapter_content.generate import stream_chapter_content
+from app.realtime.chapter_content_events import channel_name
 from app.tasks.course_creation_task import run_course_creation_job
 
 logger = logging.getLogger(__name__)
@@ -41,8 +50,8 @@ def _serialize_course(course: Course, db: Session) -> dict:
     return {
         "id": course.id, "topic_slug": course.topic_slug, "topic_raw": course.topic_raw,
         "modules": [
-            {"title": m.title, "objective": m.objective,
-             "chapters": [{"title": c.title, "objective": c.objective}
+            {"id": m.id, "title": m.title, "objective": m.objective,
+             "chapters": [{"id": c.id, "title": c.title, "objective": c.objective}
                           for c in db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()]}
             for m in modules
         ],
@@ -188,3 +197,76 @@ def get_course(slug: str, db: Session = Depends(get_session), user=Depends(get_c
     if not course:
         raise HTTPException(status_code=404, detail="course not found")
     return _serialize_course(course, db)
+
+
+def _tail_pending_diagrams(chapter_content_id: int, pending_orders: set[int], db: Session) -> Iterator[str]:
+    # A diagram task can finish (and publish) between when the section loop
+    # observed diagram_status="pending" and this subscribe call -- reconcile
+    # against current DB state first so an already-resolved diagram is never
+    # waited on.
+    sections = (
+        db.query(ChapterContentSection)
+        .filter(ChapterContentSection.chapter_content_id == chapter_content_id,
+                ChapterContentSection.order.in_(pending_orders))
+        .all()
+    )
+    for section in sections:
+        if section.diagram_status == "ready":
+            yield json.dumps({"type": "diagram_ready", "order": section.order,
+                               "diagram_image_url": section.diagram_image_url}) + "\n"
+            pending_orders.discard(section.order)
+        elif section.diagram_status == "failed":
+            yield json.dumps({"type": "diagram_failed", "order": section.order}) + "\n"
+            pending_orders.discard(section.order)
+
+    if pending_orders:
+        client = redis.Redis.from_url(settings.redis_url)
+        pubsub = client.pubsub()
+        pubsub.subscribe(channel_name(chapter_content_id))
+        deadline = time.monotonic() + settings.diagram_stream_timeout_seconds
+        try:
+            while pending_orders and time.monotonic() < deadline:
+                message = pubsub.get_message(timeout=1.0)
+                if message is None or message["type"] != "message":
+                    continue
+                event = json.loads(message["data"])
+                yield json.dumps(event) + "\n"
+                pending_orders.discard(event.get("order"))
+        finally:
+            pubsub.close()
+
+    yield json.dumps({"type": "done"}) + "\n"
+
+
+@router.get("/{slug}/chapters/{chapter_id}/content")
+def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_session),
+                          user=Depends(get_current_user)):
+    course = db.scalar(select(Course).where(Course.topic_slug == slug))
+    if not course:
+        raise HTTPException(status_code=404, detail="course not found")
+    chapter = (
+        db.query(Chapter)
+        .join(Module, Chapter.module_id == Module.id)
+        .filter(Chapter.id == chapter_id, Module.course_id == course.id)
+        .first()
+    )
+    if not chapter:
+        raise HTTPException(status_code=404, detail="chapter not found")
+
+    def _generate() -> Iterator[str]:
+        pending_orders: set[int] = set()
+        for event in stream_chapter_content(chapter, db):
+            yield json.dumps(event) + "\n"
+            if event["type"] == "section_ready" and event["diagram_status"] == "pending":
+                pending_orders.add(event["order"])
+            if event["type"] in ("done", "error"):
+                break
+
+        if pending_orders:
+            content = db.scalar(
+                select(ChapterContent).where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global")
+            )
+            if content is not None:
+                yield from _tail_pending_diagrams(content.id, pending_orders, db)
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
