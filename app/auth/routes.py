@@ -2,7 +2,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.config import settings
@@ -31,7 +31,7 @@ def _dummy_password_hash() -> str:
     return hash_password("no-such-user-timing-equalization-placeholder")
 
 
-def _issue_tokens(db: Session, user: User) -> TokenResponse:
+def _issue_tokens(db: Session, user: User, commit: bool = True) -> TokenResponse:
     raw_refresh = create_refresh_token()
     db.add(RefreshToken(
         user_id=user.id,
@@ -39,7 +39,14 @@ def _issue_tokens(db: Session, user: User) -> TokenResponse:
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_ttl_days),
         created_at=datetime.now(timezone.utc),
     ))
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        # Caller (refresh()) is holding a row lock from an earlier statement
+        # in this same transaction and needs the new row's id before it
+        # commits. flush() assigns the id and makes the insert visible to
+        # later statements in this transaction without releasing the lock.
+        db.flush()
     return TokenResponse(access_token=create_access_token(user.id), refresh_token=raw_refresh)
 
 
@@ -75,28 +82,61 @@ def login(body: LoginRequest, db: Session = Depends(get_session)):
     return _issue_tokens(db, user)
 
 
+def _revoke_active_chain(db: Session, user_id: int) -> None:
+    """Revoke every currently-active refresh token for this user. Called when
+    reuse of an already-claimed/revoked token is detected, since at that point
+    we can no longer tell which token in the chain is the legitimate one."""
+    db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
+    db.commit()
+
+
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
     token_hash = hash_token(body.refresh_token)
     token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
     if not token:
         raise HTTPException(status_code=401, detail="invalid refresh token")
-    if token.revoked_at is not None:
-        # reuse of a revoked token: revoke the whole chain for this user
-        db.query(RefreshToken).filter(
-            RefreshToken.user_id == token.user_id, RefreshToken.revoked_at.is_(None)
-        ).update({"revoked_at": datetime.now(timezone.utc)})
-        db.commit()
-        raise HTTPException(status_code=401, detail="refresh token reuse detected")
     if token.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="refresh token expired")
 
+    # Atomically claim this token: the UPDATE's WHERE clause (id +
+    # revoked_at IS NULL) takes a row lock and only succeeds for whichever
+    # concurrent request gets there first. We deliberately do NOT commit
+    # here yet - the row lock (and thus mutual exclusion against a
+    # concurrent request presenting the same token) must be held for the
+    # whole claim+mint+link unit of work below, committed exactly once at
+    # the end. If we committed the claim alone, releasing the lock early, a
+    # losing request could run its reuse chain-revoke query in the gap
+    # before this transaction's new token is committed, and miss revoking
+    # it - reopening a narrower version of the exact bug this fix targets.
+    claim = db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.id == token.id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
+    if claim.rowcount == 0:
+        # Someone else already claimed/rotated this token first (lost a
+        # concurrent race - by the time we got the row lock, theirs had
+        # already committed), or this is a genuine reuse of an
+        # already-revoked token. Either way, treat it as reuse: revoke the
+        # user's whole active chain - we can no longer tell which branch is
+        # legitimate. Because the winning claim+mint+link below is one
+        # atomic transaction gated by the same row lock, if a winner exists
+        # its new token is guaranteed to already be committed and visible
+        # by the time we get here.
+        db.rollback()
+        _revoke_active_chain(db, token.user_id)
+        raise HTTPException(status_code=401, detail="refresh token reuse detected")
+
     user = db.get(User, token.user_id)
-    new_tokens = _issue_tokens(db, user)
+    new_tokens = _issue_tokens(db, user, commit=False)
     new_token_row = db.scalar(select(RefreshToken).where(
         RefreshToken.token_hash == hash_token(new_tokens.refresh_token)
     ))
-    token.revoked_at = datetime.now(timezone.utc)
     token.replaced_by_id = new_token_row.id
     db.commit()
     return new_tokens
