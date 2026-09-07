@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 import jwt
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
@@ -28,3 +30,11 @@ def decode_access_token(token: str) -> int:
     if payload.get("type") != "access":
         raise jwt.InvalidTokenError("not an access token")
     return int(payload["sub"])
+
+
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()

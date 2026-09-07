@@ -11,10 +11,12 @@ def test_register_then_login():
     resp = client.post("/auth/register", json={"email": "a@example.com", "password": "hunter22"})
     assert resp.status_code == 201
     assert "access_token" in resp.json()
+    assert "refresh_token" in resp.json()
 
     resp = client.post("/auth/login", json={"email": "a@example.com", "password": "hunter22"})
     assert resp.status_code == 200
     assert "access_token" in resp.json()
+    assert "refresh_token" in resp.json()
 
 
 def test_login_wrong_password_rejected():
