@@ -1,0 +1,117 @@
+"""Streams a chapter's V1 content, generating whatever's missing.
+
+Not a LangGraph graph with a Postgres checkpointer (unlike course
+creation): this is a single HTTP request the user is actively waiting on,
+not a long-running background job that can crash without an active
+request to resume from. Per-row idempotency in Postgres is the whole
+resumability mechanism — a retried request (or a second concurrent open of
+the same chapter) replays what's already persisted and only generates
+what's missing, driven by the SAME persisted outline every time.
+"""
+
+from datetime import datetime, timezone
+from typing import Iterator
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from app.agents.chapter_content.nodes.generate_section_outline import generate_section_outline
+from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
+from app.models.chapter_content import ChapterContent, ChapterContentSection
+from app.models.course import Chapter
+from app.tasks.render_diagram_task import render_diagram_task
+
+
+def _section_event(section: ChapterContentSection) -> dict:
+    return {
+        "type": "section_ready",
+        "order": section.order,
+        "heading": section.heading,
+        "kind": section.kind,
+        "body_markdown": section.body_markdown,
+        "examples": section.examples,
+        "diagram_status": section.diagram_status,
+        "diagram_image_url": section.diagram_image_url,
+    }
+
+
+def _get_or_create_content(chapter_id: int, db: Session) -> ChapterContent:
+    content = db.scalar(
+        select(ChapterContent).where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "global")
+    )
+    if content is not None:
+        return content
+    now = datetime.now(timezone.utc)
+    content = ChapterContent(chapter_id=chapter_id, version=1, scope="global", status="generating",
+                              outline=[], created_at=now, updated_at=now)
+    db.add(content)
+    db.commit()
+    db.refresh(content)
+    return content
+
+
+def stream_chapter_content(chapter: Chapter, db: Session) -> Iterator[dict]:
+    content = _get_or_create_content(chapter.id, db)
+
+    existing = (
+        db.query(ChapterContentSection)
+        .filter_by(chapter_content_id=content.id)
+        .order_by(ChapterContentSection.order)
+        .all()
+    )
+    for section in existing:
+        yield _section_event(section)
+
+    if content.status == "ready":
+        yield {"type": "done"}
+        return
+
+    if not content.outline:
+        try:
+            outline = generate_section_outline(chapter.title, chapter.objective)
+        except Exception as exc:
+            content.status = "failed"
+            content.error = str(exc)
+            content.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            yield {"type": "error", "message": str(exc)}
+            return
+        content.outline = [o.model_dump() for o in outline]
+        content.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+    done_orders = {s.order for s in existing}
+    for i, entry in enumerate(content.outline):
+        if i in done_orders:
+            continue
+        try:
+            result = generate_chapter_section(
+                chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"],
+            )
+        except Exception as exc:
+            content.status = "failed"
+            content.error = str(exc)
+            content.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            yield {"type": "error", "message": str(exc)}
+            return
+
+        has_diagram = result.diagram_spec is not None
+        section = ChapterContentSection(
+            chapter_content_id=content.id, order=i, heading=entry["heading"], kind=entry["kind"],
+            body_markdown=result.body_markdown,
+            examples=[e.model_dump() for e in result.examples],
+            diagram_spec=result.diagram_spec.model_dump() if has_diagram else None,
+            diagram_status="pending" if has_diagram else None,
+        )
+        db.add(section)
+        db.commit()
+        db.refresh(section)
+
+        if has_diagram:
+            render_diagram_task.delay(section.id)  # pyright: ignore[reportFunctionMemberAccess]
+
+        yield _section_event(section)
+
+    content.status = "ready"
+    content.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    yield {"type": "done"}
