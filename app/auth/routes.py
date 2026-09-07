@@ -53,6 +53,13 @@ def _issue_tokens(db: Session, user: User, commit: bool = True) -> TokenResponse
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
 def register(body: RegisterRequest, db: Session = Depends(get_session)):
+    # Accepted tradeoff: a distinct 409 here is a user-enumeration oracle
+    # (an attacker can learn which emails are registered). This is standard
+    # practice for products where "that email is taken" is expected UX during
+    # signup, and it's a separate concern from login()'s timing equalization
+    # below, which defends the credential itself rather than account
+    # existence. Closing this would mean a generic response on both outcomes,
+    # which is a real UX tradeoff, not a bug fix — left as-is deliberately.
     existing = db.scalar(select(User).where(User.email == body.email))
     if existing:
         raise HTTPException(status_code=409, detail="email already registered")
