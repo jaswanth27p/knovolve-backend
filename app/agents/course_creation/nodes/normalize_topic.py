@@ -3,13 +3,49 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.llm.factory import get_chat_model, embed
 from app.llm.prompts import CANONICALIZE_TOPIC_PROMPT
-from app.models.course import Course
+from app.models.course import Course, CourseJob
 from app.agents.course_creation.state import CourseCreationState
 
 SIMILARITY_THRESHOLD = 0.85
 
 def _slugify(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+def find_existing(topic_raw: str, db: Session) -> Course | CourseJob | None:
+    embedding = embed(topic_raw)
+
+    course = db.scalar(
+        select(Course).order_by(Course.topic_embedding.cosine_distance(embedding)).limit(1)
+    )
+    if course is not None:
+        distance = db.scalar(
+            select(Course.topic_embedding.cosine_distance(embedding)).where(Course.id == course.id)
+        )
+        # course.id was just matched by the query above, so this second
+        # lookup against the same exact row is guaranteed to return a value.
+        assert distance is not None
+        similarity = 1 - distance
+        if similarity >= SIMILARITY_THRESHOLD:
+            return course
+
+    job = db.scalar(
+        select(CourseJob)
+        .where(CourseJob.status.in_(["pending", "running"]))
+        .order_by(CourseJob.topic_embedding.cosine_distance(embedding))
+        .limit(1)
+    )
+    if job is not None:
+        distance = db.scalar(
+            select(CourseJob.topic_embedding.cosine_distance(embedding)).where(CourseJob.id == job.id)
+        )
+        # job.id was just matched by the query above, so this second lookup
+        # against the same exact row is guaranteed to return a value.
+        assert distance is not None
+        similarity = 1 - distance
+        if similarity >= SIMILARITY_THRESHOLD:
+            return job
+
+    return None
 
 def _canonicalize(topic_raw: str) -> str:
     model = get_chat_model("canonicalize_topic")
