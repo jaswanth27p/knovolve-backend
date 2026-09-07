@@ -37,15 +37,26 @@ def persist_course(state: CourseCreationState, db: Session) -> CourseCreationSta
             db.add(module)
             db.flush()
             for chapter_draft in module_draft["chapters"]:
+                title = chapter_draft["title"]
+                # Concepts reference chapters by *title* only (Task 8's data
+                # shape), so two chapters sharing a title anywhere in the course
+                # make every concept naming it ambiguous. Silently keeping the
+                # last-inserted id would attach concepts to the wrong module's
+                # chapter and commit a corrupted graph, so fail loudly instead.
+                if title in chapter_id_by_title:
+                    raise ValueError(
+                        f"duplicate chapter title {title!r} across modules — "
+                        f"cannot unambiguously resolve concept references"
+                    )
                 chapter = Chapter(
                     module_id=module.id,
-                    title=chapter_draft["title"],
+                    title=title,
                     objective=chapter_draft["objective"],
                     order=chapter_draft["order"],
                 )
                 db.add(chapter)
                 db.flush()
-                chapter_id_by_title[chapter_draft["title"]] = chapter.id
+                chapter_id_by_title[title] = chapter.id
 
         concept_id_by_name: dict[str, int] = {}
         for concept_draft in state["concepts"]:

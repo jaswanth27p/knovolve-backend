@@ -17,10 +17,18 @@ class CourseGenerationError(RuntimeError):
     """Raised when a node keeps failing validation past its retry budget."""
 
 
+#: `validate_course` emits fixed templates, not free text, and the
+#: module-without-chapters case always contains exactly this phrase. Matching it
+#: rather than a bare "chapter" substring keeps an LLM-generated concept name
+#: like "Intro Chapter Concepts" from charging the retry to the wrong bucket.
+_NO_CHAPTERS_MARKER = "has no chapters"
+
+
 def _retry_target(error: str) -> str:
     """A missing-chapters complaint is fixed by regenerating chapters; every
-    other validation failure is about the concept graph."""
-    return "generate_chapters" if "chapter" in error else "build_concept_graph"
+    other validation failure (dangling edge reference, cyclic graph) is about
+    the concept graph."""
+    return "generate_chapters" if _NO_CHAPTERS_MARKER in error else "build_concept_graph"
 
 
 def _normalize_topic_db(state: CourseCreationState) -> CourseCreationState:

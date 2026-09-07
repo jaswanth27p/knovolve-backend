@@ -33,3 +33,4 @@ def generate_chapters(state: CourseCreationState) -> CourseCreationState:
         module["chapters"] = [c.model_dump() for c in chapters]
 
     return {**state, "modules": modules}
+

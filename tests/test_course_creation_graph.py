@@ -115,6 +115,42 @@ def test_persist_course_is_atomic_on_bad_reference():
         assert db.query(Concept).count() == 0
 
 
+def test_persist_course_rejects_duplicate_chapter_titles_across_modules():
+    """Concepts reference chapters by title alone, so two modules sharing a
+    chapter title makes every concept naming it ambiguous. That must be a loud
+    failure, not a silently mis-attached FK."""
+    state = {
+        "job_id": 4, "topic_raw": "Python", "topic_slug": "py-collision-test",
+        "topic_embedding": [0.3] * 1024, "existing_course_id": None,
+        "modules": [
+            {"title": "M1", "objective": "o", "order": 1, "chapters": [
+                {"title": "Introduction", "objective": "o", "order": 1},
+            ]},
+            {"title": "M2", "objective": "o", "order": 2, "chapters": [
+                {"title": "Introduction", "objective": "o", "order": 1},
+            ]},
+        ],
+        "concepts": [{"name": "Ambiguous", "chapter_title": "Introduction"}],
+        "concept_edges": [],
+        "error": None,
+    }
+    with SessionLocal() as db:
+        result = persist_course(state, db)
+        db.commit()
+
+    assert result["error"] is not None
+    assert "duplicate chapter title" in result["error"]
+    assert "Introduction" in result["error"]
+
+    # Rolled back before returning: nothing reached the DB despite the
+    # add()/flush() calls made along the way.
+    with SessionLocal() as db:
+        assert db.query(Course).filter_by(topic_slug="py-collision-test").count() == 0
+        assert db.query(Module).count() == 0
+        assert db.query(Chapter).count() == 0
+        assert db.query(Concept).count() == 0
+
+
 # --------------------------------------------------------------------------
 # Full-graph integration
 # --------------------------------------------------------------------------
@@ -331,3 +367,16 @@ def test_recoverable_failure_retries_then_succeeds():
     with SessionLocal() as db:
         course = db.query(Course).filter_by(topic_slug="recoverable-retry").one()
         assert db.query(Concept).filter_by(course_id=course.id).count() == 1
+
+
+def test_retry_target_matches_exact_validate_course_templates():
+    """Pin the retry-target check against validate_course's three real error
+    shapes, including a concept name that contains the word 'chapter'."""
+    from app.agents.course_creation.graph import _retry_target
+
+    assert _retry_target("module 'M1' has no chapters") == "generate_chapters"
+    assert _retry_target(
+        "concept_edge references unknown concept: "
+        "{'concept_name': 'Intro Chapter Concepts', 'prerequisite_name': 'Ghost'}"
+    ) == "build_concept_graph"
+    assert _retry_target("concept prerequisite graph is cyclic") == "build_concept_graph"
