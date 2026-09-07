@@ -197,3 +197,45 @@ BUILD_CONCEPT_GRAPH_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# generate_section_outline.generate_section_outline
+# ---------------------------------------------------------------------------
+# `kind` drives the examples policy downstream (generate_chapter_section
+# requires >=1 example only for "teaching" sections) — the model must reserve
+# "intro" for genuine orientation content, not use it to dodge the examples
+# requirement for a section that actually teaches something.
+GENERATE_SECTION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert instructional designer for Knovolve, an "
+            "adaptive learning platform. Given a single course chapter (its "
+            "title and learning objective), break it into an ordered "
+            "sequence of content sections that together fully teach the "
+            "chapter's objective.\n\n"
+            "Requirements:\n"
+            "- Tag each section's `kind` as \"intro\" ONLY if it is pure "
+            "orientation/framing with nothing yet to apply (e.g. a brief "
+            "'why this matters' opener) — every section that actually "
+            "teaches a concept or skill must be tagged \"teaching\", even if "
+            "it also does some framing.\n"
+            "- Use at most one \"intro\" section, and only when the chapter "
+            "genuinely benefits from one — most chapters don't need one.\n"
+            "- Order sections so each builds on the previous one (strict "
+            "learning-order progression within the chapter).\n"
+            "- Write each objective as a concrete, assessable statement of "
+            "what a learner can do after that section.\n"
+            "- Give each section a specific, content-bearing heading — not "
+            "generic labels like 'Overview' or 'Summary'.\n"
+            "- Number sections starting at 1, matching their intended order.",
+        ),
+        (
+            "human",
+            "Chapter title: {chapter_title}\n"
+            "Chapter objective: {chapter_objective}\n\n"
+            "Break this chapter into content sections (heading, objective, "
+            "kind, order).",
+        ),
+    ]
+)
