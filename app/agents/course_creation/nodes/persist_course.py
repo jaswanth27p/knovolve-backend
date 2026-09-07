@@ -16,6 +16,16 @@ def persist_course(state: CourseCreationState, db: Session) -> CourseCreationSta
     by that caller.
     """
     try:
+        # By the time persist_course runs, validate_course has already passed
+        # (see graph.py's edge wiring), which guarantees modules, concepts and
+        # concept_edges are all populated.
+        modules = state["modules"]
+        concepts = state["concepts"]
+        concept_edges = state["concept_edges"]
+        assert modules is not None
+        assert concepts is not None
+        assert concept_edges is not None
+
         course = Course(
             topic_slug=state["topic_slug"],
             topic_raw=state["topic_raw"],
@@ -27,7 +37,7 @@ def persist_course(state: CourseCreationState, db: Session) -> CourseCreationSta
         db.flush()
 
         chapter_id_by_title: dict[str, int] = {}
-        for module_draft in state["modules"]:
+        for module_draft in modules:
             module = Module(
                 course_id=course.id,
                 title=module_draft["title"],
@@ -59,7 +69,7 @@ def persist_course(state: CourseCreationState, db: Session) -> CourseCreationSta
                 chapter_id_by_title[title] = chapter.id
 
         concept_id_by_name: dict[str, int] = {}
-        for concept_draft in state["concepts"]:
+        for concept_draft in concepts:
             chapter_title = concept_draft["chapter_title"]
             if chapter_title not in chapter_id_by_title:
                 raise KeyError(f"concept references unknown chapter: {chapter_title!r}")
@@ -72,7 +82,7 @@ def persist_course(state: CourseCreationState, db: Session) -> CourseCreationSta
             db.flush()
             concept_id_by_name[concept_draft["name"]] = concept.id
 
-        for edge_draft in state["concept_edges"]:
+        for edge_draft in concept_edges:
             for key in ("concept_name", "prerequisite_name"):
                 if edge_draft[key] not in concept_id_by_name:
                     raise KeyError(

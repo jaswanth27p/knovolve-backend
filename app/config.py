@@ -14,4 +14,8 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 
-settings = Settings()
+# pydantic-settings sources required fields (jwt_secret, opencode_api_key,
+# openrouter_api_key) from environment variables / .env at runtime, but
+# pyright's synthesized BaseModel __init__ has no way to know that and treats
+# them as required constructor arguments.
+settings = Settings()  # pyright: ignore[reportCallIssue]

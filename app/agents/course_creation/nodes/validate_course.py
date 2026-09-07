@@ -23,16 +23,26 @@ def _has_cycle(edges: list[dict]) -> bool:
 
 
 def validate_course(state: CourseCreationState) -> CourseCreationState:
-    for module in state["modules"]:
+    # build_concept_graph always runs before validate_course (see graph.py's
+    # edge wiring, including its retry edges), so modules, concepts and
+    # concept_edges are all guaranteed populated by this point.
+    modules = state["modules"]
+    concepts = state["concepts"]
+    concept_edges = state["concept_edges"]
+    assert modules is not None
+    assert concepts is not None
+    assert concept_edges is not None
+
+    for module in modules:
         if not module["chapters"]:
             return {**state, "error": f"module '{module['title']}' has no chapters"}
 
-    concept_names = {c["name"] for c in state["concepts"]}
-    for edge in state["concept_edges"]:
+    concept_names = {c["name"] for c in concepts}
+    for edge in concept_edges:
         if edge["concept_name"] not in concept_names or edge["prerequisite_name"] not in concept_names:
             return {**state, "error": f"concept_edge references unknown concept: {edge}"}
 
-    if _has_cycle(state["concept_edges"]):
+    if _has_cycle(concept_edges):
         return {**state, "error": "concept prerequisite graph is cyclic"}
 
     return {**state, "error": None}

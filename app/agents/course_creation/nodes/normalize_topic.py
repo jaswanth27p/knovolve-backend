@@ -15,7 +15,13 @@ def _canonicalize(topic_raw: str) -> str:
     model = get_chat_model("canonicalize_topic")
     messages = CANONICALIZE_TOPIC_PROMPT.format_messages(topic_raw=topic_raw)
     resp = model.invoke(messages)
-    return resp.content.strip()
+    content = resp.content
+    # BaseMessage.content is typed as str | list[str | dict] to cover
+    # multimodal/tool-call responses; a plain chat completion always returns
+    # a str.
+    if not isinstance(content, str):
+        raise TypeError(f"expected str content from LLM response, got {type(content)}")
+    return content.strip()
 
 def normalize_topic(state: CourseCreationState, db: Session) -> CourseCreationState:
     embedding = embed(state["topic_raw"])
@@ -26,9 +32,13 @@ def normalize_topic(state: CourseCreationState, db: Session) -> CourseCreationSt
         .limit(1)
     )
     if closest is not None:
-        similarity = 1 - db.scalar(
+        distance = db.scalar(
             select(Course.topic_embedding.cosine_distance(embedding)).where(Course.id == closest.id)
         )
+        # closest.id was just matched by the query above, so this second
+        # lookup against the same exact row is guaranteed to return a value.
+        assert distance is not None
+        similarity = 1 - distance
         if similarity >= SIMILARITY_THRESHOLD:
             return {**state, "existing_course_id": closest.id, "topic_embedding": embedding}
 

@@ -23,14 +23,20 @@ def build_concept_graph(state: CourseCreationState) -> CourseCreationState:
     model = get_chat_model("build_concept_graph")
     structured = model.with_structured_output(ConceptGraphResponse)
 
+    # generate_chapters always runs before build_concept_graph (see graph.py's
+    # edge wiring), so modules is guaranteed populated by this point.
+    modules = state["modules"]
+    assert modules is not None
     chapters_summary = "\n".join(
         f"- {ch['title']} (module: {m['title']})"
-        for m in state["modules"] for ch in m["chapters"]
+        for m in modules for ch in m["chapters"]
     )
     messages = BUILD_CONCEPT_GRAPH_PROMPT.format_messages(chapters_summary=chapters_summary)
     result = structured.invoke(messages)
+    concepts = result.concepts if isinstance(result, ConceptGraphResponse) else result
+    edges = result.edges if isinstance(result, ConceptGraphResponse) else result
     return {
         **state,
-        "concepts": [c.model_dump() for c in result.concepts],
-        "concept_edges": [e.model_dump() for e in result.edges],
+        "concepts": [c.model_dump() for c in concepts],
+        "concept_edges": [e.model_dump() for e in edges],
     }

@@ -13,13 +13,14 @@ import atexit
 from threading import Lock
 
 from langgraph.checkpoint.postgres import PostgresSaver
-from psycopg.rows import dict_row
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
 
 _lock = Lock()
-_pool: ConnectionPool | None = None
+_pool: ConnectionPool[Connection[DictRow]] | None = None
 _saver: PostgresSaver | None = None
 
 
@@ -39,6 +40,12 @@ def get_checkpointer() -> PostgresSaver:
         if _saver is None:
             _pool = ConnectionPool(
                 conninfo=_psycopg_conninfo(),
+                # Declares the pool's connection type as Connection[DictRow] to
+                # match PostgresSaver's expected `Conn` type. This only affects
+                # static typing — the actual dict-row behavior at runtime comes
+                # from `row_factory=dict_row` in kwargs below, since psycopg
+                # does not derive row_factory from the generic parameter.
+                connection_class=Connection[DictRow],
                 min_size=1,
                 max_size=10,
                 # PostgresSaver requires autocommit connections with dict rows,

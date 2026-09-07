@@ -22,7 +22,10 @@ def generate_chapters(state: CourseCreationState) -> CourseCreationState:
     model = get_chat_model("generate_chapters")
     structured = model.with_structured_output(ChaptersResponse)
 
+    # generate_outline always runs before generate_chapters (see graph.py's
+    # edge wiring), so modules is guaranteed populated by this point.
     modules = state["modules"]
+    assert modules is not None
     for module in modules:
         if module["chapters"]:
             continue  # already generated in a prior (possibly crashed) run

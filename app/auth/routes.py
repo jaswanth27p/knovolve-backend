@@ -1,8 +1,9 @@
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.config import settings
@@ -122,11 +123,15 @@ def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
     # chain-revoke query in the gap before this transaction's new token is
     # committed, and miss revoking it - reopening a narrower version of the
     # exact bug this fix targets.
-    claim = db.execute(
+    # Session.execute() is typed to return the generic Result[Any] base class
+    # (it also covers ORM-returning statements), but a Core UPDATE statement
+    # always executes through the DBAPI cursor and returns a CursorResult,
+    # which is what actually carries `rowcount`.
+    claim = cast(CursorResult, db.execute(
         update(RefreshToken)
         .where(RefreshToken.id == token.id, RefreshToken.revoked_at.is_(None))
         .values(revoked_at=datetime.now(timezone.utc))
-    )
+    ))
     if claim.rowcount == 0:
         # Someone else already claimed/rotated this token first (lost a
         # concurrent race - by the time we got the row lock, theirs had
@@ -152,10 +157,16 @@ def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
         raise HTTPException(status_code=401, detail="refresh token expired")
 
     user = db.get(User, token.user_id)
+    # token.user_id is a foreign key to users.id and there is no user-deletion
+    # path in this codebase, so the referenced user is guaranteed to exist.
+    assert user is not None
     new_tokens = _issue_tokens(db, user, commit=False)
     new_token_row = db.scalar(select(RefreshToken).where(
         RefreshToken.token_hash == hash_token(new_tokens.refresh_token)
     ))
+    # _issue_tokens(commit=False) just inserted and flushed this exact row in
+    # this same transaction, so it is guaranteed to be found here.
+    assert new_token_row is not None
     token.replaced_by_id = new_token_row.id
     db.commit()
     return new_tokens
