@@ -20,7 +20,7 @@ def _make_course(slug: str, with_chapter: bool = True, content_ready: bool = Fal
                  num_chapters: int = 1):
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
-        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 1024, created_at=now)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=now)
         db.add(course)
         db.commit()
         module = Module(course_id=course.id, title="M", objective="o", order=1)

@@ -21,7 +21,7 @@ def _make_course_with_chapter(topic_slug: str) -> tuple[int, int, int]:
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
         course = Course(topic_slug=topic_slug, topic_raw=topic_slug,
-                        topic_embedding=[0.0] * 1024, created_at=now)
+                        topic_embedding=[0.0] * 2048, created_at=now)
         db.add(course)
         db.commit()
         module = Module(course_id=course.id, title="M", objective="o", order=1)
@@ -36,7 +36,7 @@ def _make_course_with_chapter(topic_slug: str) -> tuple[int, int, int]:
 def test_generating_course_enrolls_user():
     headers = _auth_headers()
     with patch("app.routes.courses._canonicalize", return_value="Elixir"), \
-         patch("app.routes.courses.embed", return_value=[0.0] * 1024), \
+         patch("app.routes.courses.embed", return_value=[0.0] * 2048), \
          patch("app.routes.courses.find_existing", return_value=None), \
          patch("app.routes.courses.run_course_creation_job.delay"):
         resp = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
@@ -71,7 +71,7 @@ def test_post_existing_course_enrolls_idempotently():
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
         course = Course(topic_slug="enroll-d", topic_raw="Elixir",
-                        topic_embedding=[0.0] * 1024, created_at=now)
+                        topic_embedding=[0.0] * 2048, created_at=now)
         db.add(course)
         db.commit()
         db.refresh(course)
@@ -79,7 +79,7 @@ def test_post_existing_course_enrolls_idempotently():
 
     patches = [
         patch("app.routes.courses._canonicalize", return_value="Elixir"),
-        patch("app.routes.courses.embed", return_value=[0.0] * 1024),
+        patch("app.routes.courses.embed", return_value=[0.0] * 2048),
         patch("app.routes.courses.find_existing", return_value=course),
         patch("app.routes.courses.run_course_creation_job.delay"),
     ]

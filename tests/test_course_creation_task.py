@@ -15,7 +15,7 @@ from app.tasks.course_creation_task import (
 def _make_job(topic_slug="celery-test-topic", status="pending"):
     with SessionLocal() as db:
         job = CourseJob(topic_slug=topic_slug, topic_raw="Celery Test Topic",
-                          topic_embedding=[1.0] + [0.0] * 1023, status=status,
+                          topic_embedding=[1.0] + [0.0] * 2047, status=status,
                           created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
         db.add(job)
         db.commit()
@@ -29,7 +29,7 @@ def _make_course(topic_slug="celery-existing-course"):
     # constraint on commit. Insert a real row and use its actual id instead.
     with SessionLocal() as db:
         course = Course(topic_slug=topic_slug, topic_raw="Celery Existing Course",
-                         topic_embedding=[0.0] * 1024,
+                         topic_embedding=[0.0] * 2048,
                          created_at=datetime.now(timezone.utc))
         db.add(course)
         db.commit()
@@ -183,7 +183,7 @@ def test_transient_failure_resumes_on_next_attempt_without_regenerating(monkeypa
         ConceptGraphResponse,
     )
 
-    FAKE = [1.0] + [0.0] * 1023
+    FAKE = [1.0] + [0.0] * 2047
     outline_model = MagicMock()
     outline_model.with_structured_output.return_value.invoke.return_value = [
         ModuleDraft(title="Basics", objective="o", order=1)

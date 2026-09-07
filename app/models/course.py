@@ -4,7 +4,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from app.db import Base
 
-EMBEDDING_DIM = 1024  # nemotron-3-embed-1b output dimension; confirm against provider docs at implementation time
+EMBEDDING_DIM = 2048  # verified against the live nemotron-3-embed-1b endpoint response
 
 
 class Course(Base):

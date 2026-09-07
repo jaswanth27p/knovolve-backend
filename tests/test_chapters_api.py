@@ -16,7 +16,7 @@ def _register_and_login(email: str) -> str:
 
 def _make_chapter(topic_slug: str) -> tuple[str, int]:
     with SessionLocal() as db:
-        course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 1024,
+        course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 2048,
                          created_at=datetime.now(timezone.utc))
         db.add(course)
         db.commit()

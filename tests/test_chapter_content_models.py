@@ -11,7 +11,7 @@ def _now():
 
 
 def _make_chapter(db, topic_slug: str) -> int:
-    course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 1024, created_at=_now())
+    course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 2048, created_at=_now())
     db.add(course)
     db.commit()
     module = Module(course_id=course.id, title="M", objective="o", order=1)

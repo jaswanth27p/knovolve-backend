@@ -17,7 +17,7 @@ def test_post_courses_enqueues_job():
     headers = _auth_headers()
     with patch("app.routes.courses._canonicalize", return_value="Elixir"), \
          patch("app.routes.courses.find_existing", return_value=None), \
-         patch("app.routes.courses.embed", return_value=[0.0] * 1024), \
+         patch("app.routes.courses.embed", return_value=[0.0] * 2048), \
          patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
     assert resp.status_code == 202
@@ -29,7 +29,7 @@ def test_post_courses_concurrent_same_topic_attaches_to_existing_job():
     from app.models.course import CourseJob
     fake_job = CourseJob(id=123, topic_slug="haskell", topic_raw="Haskell", status="pending")
     with patch("app.routes.courses._canonicalize", return_value="Haskell"), \
-         patch("app.routes.courses.embed", return_value=[0.0] * 1024), \
+         patch("app.routes.courses.embed", return_value=[0.0] * 2048), \
          patch("app.routes.courses.find_existing", return_value=fake_job):
         resp = client.post("/courses", json={"topic": "haskell"}, headers=headers)
     assert resp.status_code == 202
@@ -44,19 +44,19 @@ def test_post_courses_dedups_on_canonical_embedding():
     from app.db import SessionLocal
     from app.models.course import CourseJob
     with patch("app.routes.courses._canonicalize", return_value="Elixir") as mock_can, \
-         patch("app.routes.courses.embed", return_value=[0.5] * 1024) as mock_embed, \
+         patch("app.routes.courses.embed", return_value=[0.5] * 2048) as mock_embed, \
          patch("app.routes.courses.find_existing", return_value=None) as mock_find, \
          patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "i want to learn elixir"}, headers=headers)
     assert resp.status_code == 202
     mock_can.assert_called_once_with("i want to learn elixir")
     mock_embed.assert_called_once_with("Elixir")
-    assert mock_find.call_args.args[0] == [0.5] * 1024
+    assert mock_find.call_args.args[0] == [0.5] * 2048
     mock_delay.assert_called_once()
 
     with SessionLocal() as db:
         job = db.query(CourseJob).filter_by(topic_slug="elixir").one()
-        assert job.topic_embedding == [0.5] * 1024
+        assert job.topic_embedding == [0.5] * 2048
 
 def test_post_courses_canonicalize_failure_falls_back_to_raw():
     """An LLM flap on canonicalization must not 500 the request: falling back to
@@ -66,7 +66,7 @@ def test_post_courses_canonicalize_failure_falls_back_to_raw():
     from app.db import SessionLocal
     from app.models.course import CourseJob
     with patch("app.routes.courses._canonicalize", side_effect=RuntimeError("llm down")), \
-         patch("app.routes.courses.embed", return_value=[0.6] * 1024), \
+         patch("app.routes.courses.embed", return_value=[0.5] * 2048), \
          patch("app.routes.courses.find_existing", return_value=None), \
          patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
@@ -74,7 +74,7 @@ def test_post_courses_canonicalize_failure_falls_back_to_raw():
     mock_delay.assert_called_once()
     with SessionLocal() as db:
         job = db.query(CourseJob).filter_by(topic_slug="elixir").one()
-        assert job.topic_embedding == [0.6] * 1024
+        assert job.topic_embedding == [0.5] * 2048
 
 def test_post_courses_recovers_when_concurrent_job_claims_slug():
     """TOCTOU backstop: find_existing misses an active job (true race), the
@@ -85,7 +85,7 @@ def test_post_courses_recovers_when_concurrent_job_claims_slug():
     from app.db import SessionLocal
     from app.models.course import CourseJob
     with SessionLocal() as db:
-        job = CourseJob(topic_slug="elixir", topic_raw="Elixir", topic_embedding=[0.0] * 1024,
+        job = CourseJob(topic_slug="elixir", topic_raw="Elixir", topic_embedding=[0.0] * 2048,
                         status="running", created_at=datetime.now(timezone.utc),
                         updated_at=datetime.now(timezone.utc))
         db.add(job)
@@ -94,7 +94,7 @@ def test_post_courses_recovers_when_concurrent_job_claims_slug():
         job_id = job.id
 
     with patch("app.routes.courses._canonicalize", return_value="Elixir"), \
-         patch("app.routes.courses.embed", return_value=[0.7] * 1024), \
+         patch("app.routes.courses.embed", return_value=[0.5] * 2048), \
          patch("app.routes.courses.find_existing", return_value=None), \
          patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "elixir study guide"}, headers=headers)
@@ -114,12 +114,12 @@ def test_get_job_status():
         # before a job can reference it (the brief's literal course_id=1
         # assumed an empty-table row 1 without inserting one first).
         course = Course(topic_slug="job-status-test-course", topic_raw="x",
-                         topic_embedding=[0.0] * 1024, created_at=datetime.now(timezone.utc))
+                         topic_embedding=[0.0] * 2048, created_at=datetime.now(timezone.utc))
         db.add(course)
         db.commit()
         db.refresh(course)
 
-        job = CourseJob(topic_slug="job-status-test", topic_raw="x", topic_embedding=[0.0] * 1024,
+        job = CourseJob(topic_slug="job-status-test", topic_raw="x", topic_embedding=[0.0] * 2048,
                           status="succeeded", course_id=course.id, created_at=datetime.now(timezone.utc),
                           updated_at=datetime.now(timezone.utc))
         db.add(job)
@@ -146,7 +146,7 @@ def test_post_courses_existing_course_returns_200_not_202():
     from app.models.course import Course
     with SessionLocal() as db:
         course = Course(topic_slug="typescript", topic_raw="TypeScript",
-                        topic_embedding=[0.9] + [0.0] * 1023,
+                        topic_embedding=[0.9] + [0.0] * 2047,
                         created_at=datetime.now(timezone.utc))
         db.add(course)
         db.commit()
@@ -154,7 +154,7 @@ def test_post_courses_existing_course_returns_200_not_202():
         course_id = course.id
 
     with patch("app.routes.courses._canonicalize", return_value="TypeScript"), \
-         patch("app.routes.courses.embed", return_value=[0.9] + [0.0] * 1023), \
+         patch("app.routes.courses.embed", return_value=[0.9] + [0.0] * 2047), \
          patch("app.routes.courses.find_existing", return_value=course):
         resp = client.post("/courses", json={"topic": "typescript"}, headers=headers)
     assert resp.status_code == 200
@@ -170,7 +170,7 @@ def test_retry_failed_job_reenqueues():
     from app.models.course import CourseJob
     with SessionLocal() as db:
         job = CourseJob(topic_slug="retry-topic", topic_raw="Retry Topic",
-                        topic_embedding=[1.0] + [0.0] * 1023, status="failed",
+                        topic_embedding=[1.0] + [0.0] * 2047, status="failed",
                         error="old raw error text",
                         created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
         db.add(job)
@@ -200,7 +200,7 @@ def test_retry_non_failed_job_returns_409():
     from app.models.course import CourseJob
     with SessionLocal() as db:
         job = CourseJob(topic_slug="running-topic", topic_raw="Running Topic",
-                        topic_embedding=[1.0] + [0.0] * 1023, status="running",
+                        topic_embedding=[1.0] + [0.0] * 2047, status="running",
                         created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
         db.add(job)
         db.commit()
@@ -220,14 +220,14 @@ def test_retry_attaches_course_created_elsewhere():
     from app.models.course import Course, CourseJob
     with SessionLocal() as db:
         course = Course(topic_slug="elixir", topic_raw="Elixir",
-                        topic_embedding=[1.0] + [0.0] * 1023,
+                        topic_embedding=[1.0] + [0.0] * 2047,
                         created_at=datetime.now(timezone.utc))
         db.add(course)
         db.commit()
         db.refresh(course)
         course_id = course.id
         job = CourseJob(topic_slug="elixir", topic_raw="Elixir",
-                        topic_embedding=[1.0] + [0.0] * 1023, status="failed",
+                        topic_embedding=[1.0] + [0.0] * 2047, status="failed",
                         error="generic msg",
                         created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
         db.add(job)
@@ -263,9 +263,9 @@ def test_get_public_courses_excludes_tracked():
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
         c1 = Course(topic_slug="pub-1", topic_raw="pub 1",
-                    topic_embedding=[0.0] * 1024, created_at=now)
+                    topic_embedding=[0.0] * 2048, created_at=now)
         c2 = Course(topic_slug="pub-2", topic_raw="pub 2",
-                    topic_embedding=[0.0] * 1024, created_at=now)
+                    topic_embedding=[0.0] * 2048, created_at=now)
         db.add_all([c1, c2])
         db.commit()
         db.add(Module(course_id=c1.id, title="M", objective="o", order=1))

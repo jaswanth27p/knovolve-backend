@@ -27,7 +27,7 @@ from app.agents.course_creation import graph as graph_mod
 def test_persist_course_writes_full_tree():
     state: CourseCreationState = {
         "job_id": 1, "topic_raw": "TypeScript", "topic_slug": "ts-persist-test",
-        "topic_embedding": [0.0] * 1024, "existing_course_id": None,
+        "topic_embedding": [0.0] * 2048, "existing_course_id": None,
         "modules": [{"title": "M1", "objective": "o", "order": 1,
                      "chapters": [{"title": "C1", "objective": "o", "order": 1}]}],
         "concepts": [{"name": "X", "chapter_title": "C1"}],
@@ -51,7 +51,7 @@ def test_persist_course_resolves_string_keys_to_real_fks():
     persist_course must resolve them to real DB ids."""
     state: CourseCreationState = {
         "job_id": 2, "topic_raw": "Rust", "topic_slug": "rust-fk-test",
-        "topic_embedding": [0.1] * 1024, "existing_course_id": None,
+        "topic_embedding": [0.5] * 2048, "existing_course_id": None,
         "modules": [
             {"title": "M1", "objective": "o", "order": 1, "chapters": [
                 {"title": "Ownership", "objective": "o", "order": 1},
@@ -97,7 +97,7 @@ def test_persist_course_is_atomic_on_bad_reference():
     no course, no modules, no chapters left behind."""
     state: CourseCreationState = {
         "job_id": 3, "topic_raw": "Go", "topic_slug": "go-atomic-test",
-        "topic_embedding": [0.2] * 1024, "existing_course_id": None,
+        "topic_embedding": [0.5] * 2048, "existing_course_id": None,
         "modules": [{"title": "M1", "objective": "o", "order": 1,
                      "chapters": [{"title": "C1", "objective": "o", "order": 1}]}],
         "concepts": [{"name": "Goroutines", "chapter_title": "C1"}],
@@ -125,7 +125,7 @@ def test_persist_course_rejects_duplicate_chapter_titles_across_modules():
     failure, not a silently mis-attached FK."""
     state: CourseCreationState = {
         "job_id": 4, "topic_raw": "Python", "topic_slug": "py-collision-test",
-        "topic_embedding": [0.3] * 1024, "existing_course_id": None,
+        "topic_embedding": [0.5] * 2048, "existing_course_id": None,
         "modules": [
             {"title": "M1", "objective": "o", "order": 1, "chapters": [
                 {"title": "Introduction", "objective": "o", "order": 1},
@@ -162,7 +162,7 @@ def test_persist_course_rejects_duplicate_chapter_titles_across_modules():
 
 #: pgvector's cosine_distance is undefined for the zero vector, so the fake
 #: embedding must be non-zero for the dedup path to be exercised at all.
-FAKE_EMBEDDING = [1.0] + [0.0] * 1023
+FAKE_EMBEDDING = [1.0] + [0.0] * 2047
 
 
 def _patched_graph(outline, chapters, concept_graph, canonical_title,
@@ -368,7 +368,7 @@ def test_prune_old_checkpoints_only_touches_finished_jobs():
     def _seed_job(status, slug, days_old):
         with SessionLocal() as db:
             job = CourseJob(
-                topic_slug=slug, topic_raw=slug, topic_embedding=[1.0] + [0.0] * 1023,
+                topic_slug=slug, topic_raw=slug, topic_embedding=[1.0] + [0.0] * 2047,
                 status=status, created_at=datetime.now(timezone.utc) - timedelta(days=days_old),
                 updated_at=datetime.now(timezone.utc) - timedelta(days=days_old),
             )

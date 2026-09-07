@@ -16,7 +16,7 @@ def _make_user_and_course(db, email: str, slug: str) -> tuple[int, int]:
     db.add(user)
     db.flush()
     course = Course(topic_slug=slug, topic_raw=slug,
-                    topic_embedding=[0.0] * 1024, created_at=_now())
+                    topic_embedding=[0.0] * 2048, created_at=_now())
     db.add(course)
     db.flush()
     return user.id, course.id

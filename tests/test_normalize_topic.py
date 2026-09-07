@@ -8,7 +8,7 @@ from app.agents.course_creation.nodes.normalize_topic import normalize_topic
 def test_exact_slug_match_short_circuits():
     with SessionLocal() as db:
         db.add(Course(topic_slug="typescript", topic_raw="TypeScript",
-                       topic_embedding=[1.0] + [0.0] * 1023,
+                       topic_embedding=[1.0] + [0.0] * 2047,
                        created_at=datetime.now(timezone.utc)))
         db.commit()
         existing = db.query(Course).filter_by(topic_slug="typescript").one()
@@ -17,7 +17,7 @@ def test_exact_slug_match_short_circuits():
               "topic_embedding": None, "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 
-    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=[1.0] + [0.0] * 1023):
+    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=[1.0] + [0.0] * 2047):
         with SessionLocal() as db:
             result = normalize_topic(state, db)
     assert result["existing_course_id"] == existing.id
@@ -25,7 +25,7 @@ def test_exact_slug_match_short_circuits():
 def test_semantic_match_short_circuits_despite_different_wording():
     with SessionLocal() as db:
         db.add(Course(topic_slug="typescript-generics", topic_raw="TypeScript Generics",
-                       topic_embedding=[0.99] + [0.0] * 1023,
+                       topic_embedding=[0.99] + [0.0] * 2047,
                        created_at=datetime.now(timezone.utc)))
         db.commit()
         existing = db.query(Course).filter_by(topic_slug="typescript-generics").one()
@@ -35,7 +35,7 @@ def test_semantic_match_short_circuits_despite_different_wording():
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 
     # cosine-similar but not identical vector -> should still match above threshold
-    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=[0.98] + [0.0] * 1023):
+    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=[0.98] + [0.0] * 2047):
         with SessionLocal() as db:
             result = normalize_topic(state, db)
     assert result["existing_course_id"] == existing.id
@@ -45,26 +45,26 @@ def test_no_match_canonicalizes_and_continues():
               "topic_embedding": None, "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 
-    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=[0.0] * 1024), \
+    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=[0.0] * 2048), \
          patch("app.agents.course_creation.nodes.normalize_topic._canonicalize", return_value="JavaScript Closures"):
         with SessionLocal() as db:
             result = normalize_topic(state, db)
     assert result["existing_course_id"] is None
     assert result["topic_slug"] == "javascript-closures"
-    assert result["topic_embedding"] == [0.0] * 1024
+    assert result["topic_embedding"] == [0.0] * 2048
 
 def test_preseeded_canonical_embedding_skips_llm():
     """Production path: the route has already canonicalized and embedded, so the
     graph must dedup on that embedding without re-canonicalizing or re-embedding."""
     with SessionLocal() as db:
         db.add(Course(topic_slug="typescript", topic_raw="TypeScript",
-                       topic_embedding=[1.0] + [0.0] * 1023,
+                       topic_embedding=[1.0] + [0.0] * 2047,
                        created_at=datetime.now(timezone.utc)))
         db.commit()
         course_id = db.query(Course).filter_by(topic_slug="typescript").one().id
 
     state: CourseCreationState = {"job_id": 6, "topic_raw": "i want to learn typescript",
-              "topic_slug": "typescript", "topic_embedding": [1.0] + [0.0] * 1023,
+              "topic_slug": "typescript", "topic_embedding": [1.0] + [0.0] * 2047,
               "existing_course_id": None, "modules": None, "concepts": None,
               "concept_edges": None, "error": None}
 
@@ -87,13 +87,13 @@ def test_similarity_threshold_reads_from_settings(monkeypatch):
     from app.config import settings
     with SessionLocal() as db:
         db.add(Course(topic_slug="typescript", topic_raw="TypeScript",
-                       topic_embedding=[1.0] + [0.0] * 1023,
+                       topic_embedding=[1.0] + [0.0] * 2047,
                        created_at=datetime.now(timezone.utc)))
         db.commit()
         course_id = db.query(Course).filter_by(topic_slug="typescript").one().id
 
     text = "TypeScript"
-    near = [0.9, math.sqrt(1 - 0.9 ** 2)] + [0.0] * 1022  # cos-sim 0.9 with the course vector
+    near = [0.9, math.sqrt(1 - 0.9 ** 2)] + [0.0] * 2046  # cos-sim 0.9 with the course vector
     state: CourseCreationState = {"job_id": 5, "topic_raw": text, "topic_slug": None,
               "topic_embedding": None, "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}

@@ -39,6 +39,15 @@ def _embeddings_client() -> OpenAIEmbeddings:
         model=EMBEDDING_NODE["model"],
         request_timeout=settings.llm_request_timeout_seconds,  # pyright: ignore[reportCallIssue]
         default_headers=_DEFAULT_HEADERS,
+        # This provider's embedding endpoint only accepts raw text, not the
+        # tiktoken-encoded integer token arrays OpenAIEmbeddings sends by
+        # default ("Invalid input format. Nvidia embeddings support strings
+        # and multimodal inputs") — bypass tokenization and send text as-is.
+        check_embedding_ctx_length=False,
+        # ...and it doesn't support the base64 encoding_format OpenAIEmbeddings
+        # also defaults to ("Nvidia embeddings do not support base64
+        # encoding_format") — request plain floats instead.
+        encoding_format="float",
     )
 
 def embed(text: str) -> list[float]:

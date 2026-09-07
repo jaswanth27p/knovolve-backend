@@ -11,7 +11,7 @@ from app.agents.chapter_content.nodes.generate_chapter_section import ChapterSec
 def _make_chapter(topic_slug: str) -> Chapter:
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
-        course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 1024, created_at=now)
+        course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 2048, created_at=now)
         db.add(course)
         db.commit()
         module = Module(course_id=course.id, title="M", objective="o", order=1)
