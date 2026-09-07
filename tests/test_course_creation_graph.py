@@ -18,8 +18,10 @@ from app.agents.course_creation.nodes.build_concept_graph import (
 from app.agents.course_creation.graph import (
     MAX_RETRIES_PER_NODE,
     CourseGenerationError,
+    CoursePersistenceError,
     build_course_creation_graph,
 )
+from app.agents.course_creation import graph as graph_mod
 
 
 def test_persist_course_writes_full_tree():
@@ -376,7 +378,108 @@ def test_retry_target_matches_exact_validate_course_templates():
 
     assert _retry_target("module 'M1' has no chapters") == "generate_chapters"
     assert _retry_target(
+        "duplicate chapter title 'Introduction' found more than once across the course"
+    ) == "generate_chapters"
+    assert _retry_target(
         "concept_edge references unknown concept: "
         "{'concept_name': 'Intro Chapter Concepts', 'prerequisite_name': 'Ghost'}"
     ) == "build_concept_graph"
+    assert _retry_target(
+        "concept 'X' references unknown chapter 'Never Exists'"
+    ) == "build_concept_graph"
     assert _retry_target("concept prerequisite graph is cyclic") == "build_concept_graph"
+
+
+# --------------------------------------------------------------------------
+# Persist failures must raise, never silently succeed (issue 1)
+# --------------------------------------------------------------------------
+
+
+def test_persist_wrapper_raises_on_error_state_and_does_not_commit():
+    """The graph node wrapper must turn persist_course's error-carrying return
+    value into a raised CoursePersistenceError — a silent error-state return is
+    exactly what let a failed persist commit the job as 'succeeded' with
+    course_id=NULL."""
+    fake_session = MagicMock()
+    state = _initial_state(1, "persist wrapper test")
+    with patch.object(graph_mod, "persist_course",
+                      return_value={**state, "error": "boom"}), \
+         patch.object(graph_mod, "SessionLocal", return_value=fake_session):
+        with pytest.raises(CoursePersistenceError, match="boom"):
+            graph_mod._persist_course_db(state)
+    fake_session.commit.assert_not_called()
+
+
+def test_full_graph_raises_when_persist_fails():
+    """End-to-end: even with otherwise valid content, a persist failure must
+    surface as a raised exception out of graph.invoke, not a state with
+    error set (which the task would have committed as success)."""
+    stack, _ = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[ChapterDraft(title="Intro", objective="o", order=1)],
+        concept_graph=ConceptGraphResponse(
+            concepts=[ConceptDraft(name="C", chapter_title="Intro")], edges=[]
+        ),
+        canonical_title="Persist Raise Test",
+    )
+    with stack:
+        app_graph = build_course_creation_graph()
+        with patch.object(graph_mod, "persist_course",
+                          return_value={**_initial_state(1010, "persist raise"),
+                                        "error": "persist boom"}):
+            with pytest.raises(CoursePersistenceError, match="persist boom"):
+                app_graph.invoke(
+                    _initial_state(1010, "persist raise"),
+                    config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+                )
+
+
+def test_full_graph_repairs_duplicate_chapter_titles_via_targeted_rerun():
+    """A cross-module duplicate chapter title is caught by validate_course,
+    routed back to generate_chapters with only the offending modules flagged,
+    regenerated with uniqueness constraints, and the course then persists."""
+    stack, by_node = _patched_graph(
+        outline=[
+            ModuleDraft(title="Basics", objective="o", order=1),
+            ModuleDraft(title="Advanced", objective="o", order=2),
+        ],
+        chapters=[],
+        concept_graph=ConceptGraphResponse(
+            concepts=[
+                ConceptDraft(name="Intro Concept", chapter_title="Intro"),
+                ConceptDraft(name="Opt Concept", chapter_title="Optimization"),
+            ],
+            edges=[],
+        ),
+        canonical_title="Dup Repair Test",
+    )
+    gen = by_node["generate_chapters"].with_structured_output.return_value.invoke
+    # Pass 1: both modules emit "Intro" (collision). Closure of generate_outline
+    # keeps the outline; only the two flagged modules are regenerated on pass 2,
+    # with the second module told to avoid the first module's titles.
+    gen.side_effect = [
+        [ChapterDraft(title="Intro", objective="o", order=1)],
+        [ChapterDraft(title="Intro", objective="o", order=1)],
+        [ChapterDraft(title="Intro", objective="o", order=1)],
+        [ChapterDraft(title="Optimization", objective="o", order=1)],
+    ]
+
+    with stack:
+        app_graph = build_course_creation_graph()
+        final_state = app_graph.invoke(
+            _initial_state(1011, "dup repair"),
+            config={"configurable": {"thread_id": f"test-{uuid.uuid4()}"}},
+        )
+
+    assert final_state["error"] is None
+    assert final_state["existing_course_id"] is not None
+    assert gen.call_count == 4
+    with SessionLocal() as db:
+        course = db.query(Course).filter_by(topic_slug="dup-repair-test").one()
+        module_ids = [m.id for m in db.query(Module).filter_by(course_id=course.id).all()]
+        assert len(module_ids) == 2
+        all_titles = {
+            ch.title
+            for ch in db.query(Chapter).filter(Chapter.module_id.in_(module_ids)).all()
+        }
+        assert all_titles == {"Intro", "Optimization"}

@@ -52,3 +52,62 @@ def test_no_match_canonicalizes_and_continues():
     assert result["existing_course_id"] is None
     assert result["topic_slug"] == "javascript-closures"
     assert result["topic_embedding"] == [0.0] * 1024
+
+def test_preseeded_canonical_embedding_skips_llm():
+    """Production path: the route has already canonicalized and embedded, so the
+    graph must dedup on that embedding without re-canonicalizing or re-embedding."""
+    with SessionLocal() as db:
+        db.add(Course(topic_slug="typescript", topic_raw="TypeScript",
+                       topic_embedding=[1.0] + [0.0] * 1023,
+                       created_at=datetime.now(timezone.utc)))
+        db.commit()
+        course_id = db.query(Course).filter_by(topic_slug="typescript").one().id
+
+    state: CourseCreationState = {"job_id": 6, "topic_raw": "i want to learn typescript",
+              "topic_slug": "typescript", "topic_embedding": [1.0] + [0.0] * 1023,
+              "existing_course_id": None, "modules": None, "concepts": None,
+              "concept_edges": None, "error": None}
+
+    with patch("app.agents.course_creation.nodes.normalize_topic._canonicalize") as mock_can, \
+         patch("app.agents.course_creation.nodes.normalize_topic.embed") as mock_embed:
+        with SessionLocal() as db:
+            result = normalize_topic(state, db)
+    assert result["existing_course_id"] == course_id
+    mock_can.assert_not_called()
+    mock_embed.assert_not_called()
+
+def test_slugify_preserves_unicode_and_separators():
+    from app.agents.course_creation.nodes.normalize_topic import _slugify
+    assert _slugify("日本語 Programming") == "日本語-programming"
+    assert _slugify("TypeScript 2.0") == "typescript-2-0"
+    assert _slugify("C++") == "c"
+
+def test_similarity_threshold_reads_from_settings(monkeypatch):
+    import math
+    from app.config import settings
+    with SessionLocal() as db:
+        db.add(Course(topic_slug="typescript", topic_raw="TypeScript",
+                       topic_embedding=[1.0] + [0.0] * 1023,
+                       created_at=datetime.now(timezone.utc)))
+        db.commit()
+        course_id = db.query(Course).filter_by(topic_slug="typescript").one().id
+
+    text = "TypeScript"
+    near = [0.9, math.sqrt(1 - 0.9 ** 2)] + [0.0] * 1022  # cos-sim 0.9 with the course vector
+    state: CourseCreationState = {"job_id": 5, "topic_raw": text, "topic_slug": None,
+              "topic_embedding": None, "existing_course_id": None,
+              "modules": None, "concepts": None, "concept_edges": None, "error": None}
+
+    monkeypatch.setattr(settings, "topic_similarity_threshold", 0.80)
+    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=near):
+        with SessionLocal() as db:
+            result = normalize_topic(state, db)
+    assert result["existing_course_id"] == course_id
+
+    monkeypatch.setattr(settings, "topic_similarity_threshold", 0.95)
+    with patch("app.agents.course_creation.nodes.normalize_topic.embed", return_value=near), \
+         patch("app.agents.course_creation.nodes.normalize_topic._canonicalize", return_value=text):
+        with SessionLocal() as db:
+            result = normalize_topic(state, db)
+    assert result["existing_course_id"] is None
+    assert result["topic_slug"] == "typescript"

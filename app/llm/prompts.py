@@ -135,7 +135,12 @@ GENERATE_CHAPTERS_PROMPT = ChatPromptTemplate.from_messages(
             "human",
             "Module title: {module_title}\n"
             "Module objective: {module_objective}\n\n"
-            "Break this module into chapters (title, objective, order).",
+            "Existing chapter titles already used by OTHER modules of this "
+            "course:\n{existing_titles}\n\n"
+            "If the list above is not empty, none of your chapter titles may "
+            "duplicate an entry in it — every chapter title in the whole "
+            "course must be unique. Break this module into chapters (title, "
+            "objective, order).",
         ),
     ]
 )

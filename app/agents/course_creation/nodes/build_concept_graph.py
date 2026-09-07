@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from app.llm.factory import get_chat_model
 from app.llm.prompts import BUILD_CONCEPT_GRAPH_PROMPT
+from app.llm.retry import call_with_retry
 from app.agents.course_creation.state import CourseCreationState
 
 
@@ -32,7 +33,7 @@ def build_concept_graph(state: CourseCreationState) -> CourseCreationState:
         for m in modules for ch in m["chapters"]
     )
     messages = BUILD_CONCEPT_GRAPH_PROMPT.format_messages(chapters_summary=chapters_summary)
-    result = structured.invoke(messages)
+    result = call_with_retry(structured.invoke, messages)
     concepts = result.concepts if isinstance(result, ConceptGraphResponse) else result
     edges = result.edges if isinstance(result, ConceptGraphResponse) else result
     return {

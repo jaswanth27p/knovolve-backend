@@ -17,18 +17,33 @@ class CourseGenerationError(RuntimeError):
     """Raised when a node keeps failing validation past its retry budget."""
 
 
+class CoursePersistenceError(CourseGenerationError):
+    """Raised when persisting a *validated* course tree to the DB fails.
+
+    Subclasses CourseGenerationError so the Celery task treats it as terminal
+    (mark job failed, do not retry). validate_course is supposed to catch
+    content defects before this point; reaching here means a constraint the
+    validator does not model or a hard DB error, neither of which another
+    generation attempt would fix.
+    """
+
+
 #: `validate_course` emits fixed templates, not free text, and the
 #: module-without-chapters case always contains exactly this phrase. Matching it
 #: rather than a bare "chapter" substring keeps an LLM-generated concept name
 #: like "Intro Chapter Concepts" from charging the retry to the wrong bucket.
 _NO_CHAPTERS_MARKER = "has no chapters"
+_DUP_CHAPTER_TITLE_MARKER = "duplicate chapter title"
 
 
 def _retry_target(error: str) -> str:
-    """A missing-chapters complaint is fixed by regenerating chapters; every
-    other validation failure (dangling edge reference, cyclic graph) is about
-    the concept graph."""
-    return "generate_chapters" if _NO_CHAPTERS_MARKER in error else "build_concept_graph"
+    """A missing-chapters or duplicate-title complaint is fixed by
+    regenerating chapters; every other validation failure (dangling edge
+    reference, unknown chapter ref, cyclic graph) is about the concept
+    graph."""
+    if _NO_CHAPTERS_MARKER in error or _DUP_CHAPTER_TITLE_MARKER in error:
+        return "generate_chapters"
+    return "build_concept_graph"
 
 
 def _normalize_topic_db(state: CourseCreationState) -> CourseCreationState:
@@ -39,8 +54,14 @@ def _normalize_topic_db(state: CourseCreationState) -> CourseCreationState:
 def _persist_course_db(state: CourseCreationState) -> CourseCreationState:
     with SessionLocal() as db:
         result = persist_course(state, db)
-        if result["error"] is None:
-            db.commit()
+        if result["error"] is not None:
+            # persist_course has already rolled back its own transaction. Raise
+            # so the failure propagates out of graph.invoke() — the alternative
+            # (returning an error-carrying state over the unconditional
+            # persist_course -> END edge) made the Celery task commit the job as
+            # "succeeded" with course_id=NULL and blank-page the frontend.
+            raise CoursePersistenceError(result["error"])
+        db.commit()
         return result
 
 

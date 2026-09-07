@@ -8,7 +8,23 @@ class Settings(BaseSettings):
     jwt_access_ttl_minutes: int = 15
     jwt_refresh_ttl_days: int = 30
     opencode_api_key: str
+    opencode_zen_api_key: str = ""
     openrouter_api_key: str
+    # JSON list in .env, e.g. CORS_ORIGINS=["http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:3000"]
+    # Minimum cosine similarity for a Course/CourseJob to count as an existing
+    # version of a requested topic (dedup).
+    topic_similarity_threshold: float = 0.85
+    # Celery broker: how long a crashed worker's message stays invisible before
+    # redelivery. Must comfortably exceed the longest single graph run.
+    celery_visibility_timeout_seconds: int = 6 * 60 * 60
+    # Exponential backoff for external LLM/embedding calls (tenacity). These are
+    # workflow-scoped knobs today; they are read from Settings so a global policy
+    # can reuse the same values later.
+    llm_retry_max_attempts: int = 4
+    llm_retry_multiplier_seconds: float = 1.0
+    llm_retry_max_delay_seconds: float = 30.0
+    llm_retry_jitter_seconds: float = 0.5
 
     class Config:
         env_file = ".env"

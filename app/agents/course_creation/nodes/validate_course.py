@@ -37,6 +37,35 @@ def validate_course(state: CourseCreationState) -> CourseCreationState:
         if not module["chapters"]:
             return {**state, "error": f"module '{module['title']}' has no chapters"}
 
+    # Chapter titles must be globally unique: persist_course resolves concept
+    # references by exact title, so a title appearing twice — even inside one
+    # module — makes every concept naming it ambiguous. Regeneration is scoped
+    # to just the modules that produced the collision via the rerun_modules
+    # hint consumed by generate_chapters.
+    title_modules: dict[str, list[str]] = {}
+    for module in modules:
+        for ch in module["chapters"]:
+            title_modules.setdefault(ch["title"], []).append(module["title"])
+    duplicate_titles = {t for t, ms in title_modules.items() if len(ms) > 1}
+    if duplicate_titles:
+        title = sorted(duplicate_titles)[0]
+        rerun = sorted(set(title_modules[title]))
+        return {
+            **state,
+            "error": f"duplicate chapter title {title!r} found more than once "
+            f"across the course",
+            "rerun_modules": rerun,
+        }
+
+    chapter_titles = set(title_modules)
+    for concept in concepts:
+        if concept["chapter_title"] not in chapter_titles:
+            return {
+                **state,
+                "error": f"concept {concept['name']!r} references unknown "
+                f"chapter {concept['chapter_title']!r}",
+            }
+
     concept_names = {c["name"] for c in concepts}
     for edge in concept_edges:
         if edge["concept_name"] not in concept_names or edge["prerequisite_name"] not in concept_names:

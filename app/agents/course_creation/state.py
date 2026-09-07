@@ -16,3 +16,7 @@ class CourseCreationState(TypedDict):
     # mapping from channel values on every step, so only values *returned* by a
     # node survive across graph steps.
     retry_counts: NotRequired[dict[str, int]]
+    # Module titles whose chapters must be regenerated after a cross-module
+    # duplicate-title validation failure. Consumed (and reset) by
+    # generate_chapters.
+    rerun_modules: NotRequired[list[str]]

@@ -22,7 +22,8 @@ def test_embed_calls_configured_provider(monkeypatch):
         assert result == [0.1, 0.2, 0.3]
 
 def test_swapping_provider_is_config_only(monkeypatch):
-    monkeypatch.setenv("OPENCODE_ZEN_API_KEY", "test-key")
+    from app.config import settings
+    monkeypatch.setattr(settings, "opencode_zen_api_key", "test-key")
     original = llm_config.LLM_NODES["generate_outline"]
     llm_config.LLM_NODES["generate_outline"] = {"provider": "opencode-zen", "model": "gpt-5.6"}
     try:

@@ -43,3 +43,67 @@ def test_dangling_concept_edge_reference_fails():
     result = validate_course(state)
     assert result["error"] is not None
     assert "reference" in result["error"].lower() or "unknown" in result["error"].lower()
+
+
+def test_dup_chapter_title_across_modules_fails_with_rerun_hint():
+    """A chapter title appearing in more than one module makes concept
+    references ambiguous (persist resolves by title), so it must be caught here
+    and routed back to generate_chapters with the offending modules named."""
+    state = _base_state(
+        modules=[
+            {"title": "M1", "objective": "o", "order": 1,
+             "chapters": [{"title": "Introduction", "objective": "o", "order": 1}]},
+            {"title": "M2", "objective": "o", "order": 2,
+             "chapters": [{"title": "Introduction", "objective": "o", "order": 1}]},
+        ],
+        concepts=[{"name": "X", "chapter_title": "Introduction"}],
+    )
+    result = validate_course(state)
+    assert result["error"] is not None
+    assert "duplicate chapter title" in result["error"]
+    assert (result.get("rerun_modules") or []) == ["M1", "M2"]
+
+
+def test_concept_referencing_unknown_chapter_fails():
+    state = _base_state(
+        concepts=[{"name": "X", "chapter_title": "Never Exists"}],
+    )
+    result = validate_course(state)
+    assert result["error"] is not None
+    assert "unknown chapter" in result["error"]
+
+
+def test_cycle_cases():
+    """Regression coverage for the DFS cycle detector: 3-node cycle, self-loop,
+    and the two non-cycles it must NOT flag (disconnected components and a
+    converging DAG)."""
+    def state_for(name, edges):
+        concepts = [{"name": n, "chapter_title": "C1"} for n in name]
+        return _base_state(concepts=concepts, concept_edges=edges)
+
+    three_node_cycle = state_for(
+        ["A", "B", "C"],
+        [{"concept_name": "A", "prerequisite_name": "B"},
+         {"concept_name": "B", "prerequisite_name": "C"},
+         {"concept_name": "C", "prerequisite_name": "A"}],
+    )
+    assert validate_course(three_node_cycle)["error"] == "concept prerequisite graph is cyclic"
+
+    self_loop = state_for(
+        ["A"],
+        [{"concept_name": "A", "prerequisite_name": "A"}],
+    )
+    assert validate_course(self_loop)["error"] == "concept prerequisite graph is cyclic"
+
+    disconnected = state_for(
+        ["A", "B"],
+        [{"concept_name": "A", "prerequisite_name": "B"}],
+    )
+    assert validate_course(disconnected)["error"] is None
+
+    converging = state_for(
+        ["A", "B", "C"],
+        [{"concept_name": "A", "prerequisite_name": "C"},
+         {"concept_name": "B", "prerequisite_name": "C"}],
+    )
+    assert validate_course(converging)["error"] is None

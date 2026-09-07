@@ -1,14 +1,14 @@
 PROVIDERS = {
     "opencode-go": {
         "base_url": "https://opencode.ai/zen/go/v1",
-        "api_key_env": "OPENCODE_API_KEY",
+        "settings_field": "opencode_api_key",
     },
     "opencode-zen": {
         "base_url": "https://opencode.ai/zen/v1",
-        "api_key_env": "OPENCODE_ZEN_API_KEY",
+        "settings_field": "opencode_zen_api_key",
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
-        "api_key_env": "OPENROUTER_API_KEY",
+        "settings_field": "openrouter_api_key",
     },
 }
