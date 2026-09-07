@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     llm_retry_multiplier_seconds: float = 1.0
     llm_retry_max_delay_seconds: float = 30.0
     llm_retry_jitter_seconds: float = 0.5
+    # MinIO/S3-compatible object storage for diagram images.
+    s3_endpoint: str = "http://localhost:9000"
+    s3_public_endpoint: str = "http://localhost:9000"
+    s3_bucket: str = "knovolve"
+    s3_access_key: str = "minioadmin"
+    s3_secret_key: str = "minioadmin"
 
     class Config:
         env_file = ".env"
