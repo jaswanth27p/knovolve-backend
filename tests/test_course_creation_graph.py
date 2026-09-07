@@ -6,11 +6,13 @@ import pytest
 
 from app.db import SessionLocal
 from app.models.course import Course, Module, Chapter, Concept, ConceptEdge
+from app.agents.course_creation.state import CourseCreationState
 from app.agents.course_creation.nodes.persist_course import persist_course
 from app.agents.course_creation.nodes.generate_outline import ModuleDraft
 from app.agents.course_creation.nodes.generate_chapters import ChapterDraft
 from app.agents.course_creation.nodes.build_concept_graph import (
     ConceptDraft,
+    ConceptEdgeDraft,
     ConceptGraphResponse,
 )
 from app.agents.course_creation.graph import (
@@ -21,7 +23,7 @@ from app.agents.course_creation.graph import (
 
 
 def test_persist_course_writes_full_tree():
-    state = {
+    state: CourseCreationState = {
         "job_id": 1, "topic_raw": "TypeScript", "topic_slug": "ts-persist-test",
         "topic_embedding": [0.0] * 1024, "existing_course_id": None,
         "modules": [{"title": "M1", "objective": "o", "order": 1,
@@ -45,7 +47,7 @@ def test_persist_course_writes_full_tree():
 def test_persist_course_resolves_string_keys_to_real_fks():
     """Task 8 emits concepts/edges keyed by *name*/*chapter_title* strings;
     persist_course must resolve them to real DB ids."""
-    state = {
+    state: CourseCreationState = {
         "job_id": 2, "topic_raw": "Rust", "topic_slug": "rust-fk-test",
         "topic_embedding": [0.1] * 1024, "existing_course_id": None,
         "modules": [
@@ -91,7 +93,7 @@ def test_persist_course_resolves_string_keys_to_real_fks():
 def test_persist_course_is_atomic_on_bad_reference():
     """An edge naming a concept that does not exist must abort the whole write:
     no course, no modules, no chapters left behind."""
-    state = {
+    state: CourseCreationState = {
         "job_id": 3, "topic_raw": "Go", "topic_slug": "go-atomic-test",
         "topic_embedding": [0.2] * 1024, "existing_course_id": None,
         "modules": [{"title": "M1", "objective": "o", "order": 1,
@@ -119,7 +121,7 @@ def test_persist_course_rejects_duplicate_chapter_titles_across_modules():
     """Concepts reference chapters by title alone, so two modules sharing a
     chapter title makes every concept naming it ambiguous. That must be a loud
     failure, not a silently mis-attached FK."""
-    state = {
+    state: CourseCreationState = {
         "job_id": 4, "topic_raw": "Python", "topic_slug": "py-collision-test",
         "topic_embedding": [0.3] * 1024, "existing_course_id": None,
         "modules": [
@@ -195,7 +197,7 @@ def _patched_graph(outline, chapters, concept_graph, canonical_title,
     return stack, by_node
 
 
-def _initial_state(job_id: int, topic_raw: str) -> dict:
+def _initial_state(job_id: int, topic_raw: str) -> CourseCreationState:
     return {
         "job_id": job_id, "topic_raw": topic_raw, "topic_slug": None,
         "topic_embedding": None, "existing_course_id": None,
@@ -239,14 +241,12 @@ def test_full_graph_short_circuits_on_existing_course():
     """normalize_topic finding a near-duplicate must end the run without
     generating or persisting anything new."""
     with SessionLocal() as db:
-        existing = persist_course(
-            {
-                "job_id": 0, "topic_raw": "Dup", "topic_slug": "dup-course",
-                "topic_embedding": FAKE_EMBEDDING, "existing_course_id": None,
-                "modules": [], "concepts": [], "concept_edges": [], "error": None,
-            },
-            db,
-        )
+        dup_state: CourseCreationState = {
+            "job_id": 0, "topic_raw": "Dup", "topic_slug": "dup-course",
+            "topic_embedding": FAKE_EMBEDDING, "existing_course_id": None,
+            "modules": [], "concepts": [], "concept_edges": [], "error": None,
+        }
+        existing = persist_course(dup_state, db)
         db.commit()
     existing_id = existing["existing_course_id"]
 
@@ -340,7 +340,7 @@ def test_recoverable_failure_retries_then_succeeds():
     without tripping the cap."""
     bad = ConceptGraphResponse(
         concepts=[ConceptDraft(name="A", chapter_title="Intro")],
-        edges=[{"concept_name": "A", "prerequisite_name": "Ghost"}],
+        edges=[ConceptEdgeDraft(concept_name="A", prerequisite_name="Ghost")],
     )
     good = ConceptGraphResponse(
         concepts=[ConceptDraft(name="A", chapter_title="Intro")], edges=[]

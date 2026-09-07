@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 from app.db import SessionLocal
 from app.models.course import Course
+from app.agents.course_creation.state import CourseCreationState
 from app.agents.course_creation.nodes.normalize_topic import normalize_topic
 
 def test_exact_slug_match_short_circuits():
@@ -12,7 +13,7 @@ def test_exact_slug_match_short_circuits():
         db.commit()
         existing = db.query(Course).filter_by(topic_slug="typescript").one()
 
-    state = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": None,
+    state: CourseCreationState = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": None,
               "topic_embedding": None, "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 
@@ -29,7 +30,7 @@ def test_semantic_match_short_circuits_despite_different_wording():
         db.commit()
         existing = db.query(Course).filter_by(topic_slug="typescript-generics").one()
 
-    state = {"job_id": 2, "topic_raw": "generics in typescript", "topic_slug": None,
+    state: CourseCreationState = {"job_id": 2, "topic_raw": "generics in typescript", "topic_slug": None,
               "topic_embedding": None, "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 
@@ -40,7 +41,7 @@ def test_semantic_match_short_circuits_despite_different_wording():
     assert result["existing_course_id"] == existing.id
 
 def test_no_match_canonicalizes_and_continues():
-    state = {"job_id": 3, "topic_raw": "closures in js", "topic_slug": None,
+    state: CourseCreationState = {"job_id": 3, "topic_raw": "closures in js", "topic_slug": None,
               "topic_embedding": None, "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 

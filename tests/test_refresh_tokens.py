@@ -66,6 +66,7 @@ def test_reuse_of_already_expired_revoked_token_still_revokes_chain():
         old_token_row = db.scalar(
             select(RefreshToken).where(RefreshToken.token_hash == hash_token(old_refresh))
         )
+        assert old_token_row is not None  # rotated above, so its row must exist
         assert old_token_row.revoked_at is not None
         old_token_row.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
         db.commit()

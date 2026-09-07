@@ -1,9 +1,10 @@
 from unittest.mock import patch, MagicMock
+from app.agents.course_creation.state import CourseCreationState
 from app.agents.course_creation.nodes.generate_chapters import generate_chapters, ChapterDraft
 
 
 def test_generate_chapters_fills_each_module():
-    state = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": "typescript",
+    state: CourseCreationState = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": "typescript",
               "topic_embedding": [0.0], "existing_course_id": None,
               "modules": [
                   {"title": "Basic Types", "objective": "...", "order": 1, "chapters": []},
@@ -18,15 +19,17 @@ def test_generate_chapters_fills_each_module():
     with patch("app.agents.course_creation.nodes.generate_chapters.get_chat_model", return_value=mock_model):
         result = generate_chapters(state)
 
-    assert len(result["modules"][0]["chapters"]) == 1
-    assert len(result["modules"][1]["chapters"]) == 1
+    modules = result["modules"]
+    assert modules is not None  # generate_chapters always returns the modules list it was given
+    assert len(modules[0]["chapters"]) == 1
+    assert len(modules[1]["chapters"]) == 1
     assert mock_model.with_structured_output.return_value.invoke.call_count == 2
 
 
 def test_generate_chapters_skips_modules_already_filled():
     """Resumability: a module with chapters already populated (from a prior
     partial run) must not be regenerated."""
-    state = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": "typescript",
+    state: CourseCreationState = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": "typescript",
               "topic_embedding": [0.0], "existing_course_id": None,
               "modules": [
                   {"title": "Basic Types", "objective": "...", "order": 1,
@@ -42,5 +45,7 @@ def test_generate_chapters_skips_modules_already_filled():
     with patch("app.agents.course_creation.nodes.generate_chapters.get_chat_model", return_value=mock_model):
         result = generate_chapters(state)
 
-    assert result["modules"][0]["chapters"][0]["title"] == "already done"  # untouched
+    modules = result["modules"]
+    assert modules is not None  # generate_chapters always returns the modules list it was given
+    assert modules[0]["chapters"][0]["title"] == "already done"  # untouched
     assert mock_model.with_structured_output.return_value.invoke.call_count == 1  # only module 2 regenerated

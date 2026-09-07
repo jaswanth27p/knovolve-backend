@@ -1,14 +1,19 @@
+from typing import cast
+from app.agents.course_creation.state import CourseCreationState
 from app.agents.course_creation.nodes.validate_course import validate_course
 
-def _base_state(**overrides):
-    state = {"job_id": 1, "topic_raw": "T", "topic_slug": "t", "topic_embedding": [0.0],
+def _base_state(**overrides: object) -> CourseCreationState:
+    state: CourseCreationState = {"job_id": 1, "topic_raw": "T", "topic_slug": "t", "topic_embedding": [0.0],
               "existing_course_id": None,
               "modules": [{"title": "M1", "objective": "o", "order": 1,
                            "chapters": [{"title": "C1", "objective": "o", "order": 1}]}],
               "concepts": [{"name": "X", "chapter_title": "C1"}],
               "concept_edges": [], "error": None}
-    state.update(overrides)
-    return state
+    # overrides is a caller-supplied **kwargs dict of valid CourseCreationState
+    # fields (verified by every call site in this file); a TypedDict can't
+    # express "partial update from arbitrary kwargs" any more precisely than
+    # this cast.
+    return cast(CourseCreationState, {**state, **overrides})
 
 def test_valid_course_passes():
     result = validate_course(_base_state())

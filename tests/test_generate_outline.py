@@ -1,9 +1,10 @@
 from unittest.mock import patch, MagicMock
+from app.agents.course_creation.state import CourseCreationState
 from app.agents.course_creation.nodes.generate_outline import generate_outline, ModuleDraft
 
 
 def test_generate_outline_produces_validated_modules():
-    state = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": "typescript",
+    state: CourseCreationState = {"job_id": 1, "topic_raw": "TypeScript", "topic_slug": "typescript",
               "topic_embedding": [0.0], "existing_course_id": None,
               "modules": None, "concepts": None, "concept_edges": None, "error": None}
 
@@ -17,6 +18,8 @@ def test_generate_outline_produces_validated_modules():
     with patch("app.agents.course_creation.nodes.generate_outline.get_chat_model", return_value=mock_model):
         result = generate_outline(state)
 
-    assert len(result["modules"]) == 2
-    assert result["modules"][0]["title"] == "Basic Types"
-    assert result["modules"][0]["chapters"] == []
+    modules = result["modules"]
+    assert modules is not None  # generate_outline always populates modules on success
+    assert len(modules) == 2
+    assert modules[0]["title"] == "Basic Types"
+    assert modules[0]["chapters"] == []
