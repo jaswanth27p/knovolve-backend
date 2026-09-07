@@ -12,6 +12,7 @@ what's missing, driven by the SAME persisted outline every time.
 from datetime import datetime, timezone
 from typing import Iterator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.agents.chapter_content.nodes.generate_section_outline import generate_section_outline
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
@@ -43,7 +44,20 @@ def _get_or_create_content(chapter_id: int, db: Session) -> ChapterContent:
     content = ChapterContent(chapter_id=chapter_id, version=1, scope="global", status="generating",
                               outline=[], created_at=now, updated_at=now)
     db.add(content)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent opens of an ungenerated chapter can both pass the
+        # select above; the partial unique index (chapter_id, version) for
+        # scope="global" lets exactly one insert win. The loser adopts the
+        # winner's row rather than 500-ing the request.
+        db.rollback()
+        winner = db.scalar(
+            select(ChapterContent).where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "global")
+        )
+        if winner is None:
+            raise
+        return winner
     db.refresh(content)
     return content
 
@@ -74,9 +88,16 @@ def stream_chapter_content(chapter: Chapter, db: Session) -> Iterator[dict]:
             db.commit()
             yield {"type": "error", "message": str(exc)}
             return
-        content.outline = [o.model_dump() for o in outline]
-        content.updated_at = datetime.now(timezone.utc)
-        db.commit()
+        # A concurrent open of the same never-before-generated chapter can
+        # reach this point too; re-read the row before writing so a slower
+        # generator never overwrites a faster one's already-persisted outline
+        # (this UPDATE has no unique constraint to raise IntegrityError, so
+        # the check has to happen here instead of via a commit-time conflict).
+        db.refresh(content)
+        if not content.outline:
+            content.outline = [o.model_dump() for o in outline]
+            content.updated_at = datetime.now(timezone.utc)
+            db.commit()
 
     done_orders = {s.order for s in existing}
     for i, entry in enumerate(content.outline):
@@ -94,24 +115,54 @@ def stream_chapter_content(chapter: Chapter, db: Session) -> Iterator[dict]:
             yield {"type": "error", "message": str(exc)}
             return
 
-        has_diagram = result.diagram_spec is not None
+        diagram_spec = result.diagram_spec
         section = ChapterContentSection(
             chapter_content_id=content.id, order=i, heading=entry["heading"], kind=entry["kind"],
             body_markdown=result.body_markdown,
             examples=[e.model_dump() for e in result.examples],
-            diagram_spec=result.diagram_spec.model_dump() if has_diagram else None,
-            diagram_status="pending" if has_diagram else None,
+            diagram_spec=diagram_spec.model_dump() if diagram_spec is not None else None,
+            diagram_status="pending" if diagram_spec is not None else None,
         )
         db.add(section)
-        db.commit()
-        db.refresh(section)
-
-        if has_diagram:
-            render_diagram_task.delay(section.id)  # pyright: ignore[reportFunctionMemberAccess]
+        try:
+            db.commit()
+        except IntegrityError:
+            # A concurrent open of the same chapter generated and persisted this
+            # exact section first (unique (chapter_content_id, order)). Adopt the
+            # winner's row — don't re-generate or re-dispatch its diagram — and
+            # resume from here.
+            db.rollback()
+            section = db.scalar(
+                select(ChapterContentSection).where(
+                    ChapterContentSection.chapter_content_id == content.id,
+                    ChapterContentSection.order == i,
+                )
+            )
+            if section is None:
+                raise
+        else:
+            db.refresh(section)
+            if diagram_spec is not None:
+                render_diagram_task.delay(section.id)  # pyright: ignore[reportFunctionMemberAccess]
 
         yield _section_event(section)
 
-    content.status = "ready"
-    content.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    # Re-check against the DB before flipping to "ready". Under a concurrent
+    # double-open both generators loop over the same outline; this generator may
+    # have "adopted" the winner's rows (IntegrityError path above) while the
+    # winner is still generating later sections. Flipping ready now would let a
+    # later crash of the winner strand the chapter "ready" yet incomplete (and it
+    # would then never be regenerated). Only claim ready once every outline order
+    # actually has a persisted section.
+    persisted_orders = {
+        s.order for s in db.scalars(
+            select(ChapterContentSection).where(
+                ChapterContentSection.chapter_content_id == content.id
+            )
+        )
+    }
+    if persisted_orders == set(range(len(content.outline))):
+        content.status = "ready"
+        content.updated_at = datetime.now(timezone.utc)
+        db.commit()
     yield {"type": "done"}

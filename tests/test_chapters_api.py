@@ -108,3 +108,7 @@ def test_content_endpoint_tails_redis_for_pending_diagram():
     diagram_events = [e for e in events if e["type"] == "diagram_ready"]
     assert len(diagram_events) == 1
     assert diagram_events[0]["diagram_image_url"] == "http://x/y.svg"
+    # Exactly one terminal event, and it comes after the diagram event.
+    done_events = [e for e in events if e["type"] == "done"]
+    assert len(done_events) == 1
+    assert done_events[0] is events[-1]
