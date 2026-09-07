@@ -100,19 +100,28 @@ def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
     token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
     if not token:
         raise HTTPException(status_code=401, detail="invalid refresh token")
-    if token.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="refresh token expired")
 
-    # Atomically claim this token: the UPDATE's WHERE clause (id +
-    # revoked_at IS NULL) takes a row lock and only succeeds for whichever
-    # concurrent request gets there first. We deliberately do NOT commit
-    # here yet - the row lock (and thus mutual exclusion against a
-    # concurrent request presenting the same token) must be held for the
-    # whole claim+mint+link unit of work below, committed exactly once at
-    # the end. If we committed the claim alone, releasing the lock early, a
-    # losing request could run its reuse chain-revoke query in the gap
-    # before this transaction's new token is committed, and miss revoking
-    # it - reopening a narrower version of the exact bug this fix targets.
+    # Atomically claim this token BEFORE checking expiry, and unconditionally
+    # of it: the UPDATE's WHERE clause (id + revoked_at IS NULL) takes a row
+    # lock and only succeeds for whichever concurrent request gets there
+    # first. Precedence matters here, not just timing - if we checked
+    # expires_at first, a token that was already revoked by a legitimate
+    # prior rotation (or a genuine reuse attempt) AND has since crossed its
+    # own TTL would short-circuit into a bare "expired" 401 and never reach
+    # chain revocation below, silently leaving that chain's live sibling
+    # token undetected (the classic "steal a token, wait out its TTL, then
+    # replay it" attack). Attempting the claim first means an
+    # already-revoked token - expired or not - always routes to reuse
+    # detection.
+    #
+    # We deliberately do NOT commit the claim on its own yet - the row lock
+    # (and thus mutual exclusion against a concurrent request presenting the
+    # same token) must be held for the whole claim+mint+link unit of work
+    # below, committed exactly once at the end. If we committed the claim
+    # alone, releasing the lock early, a losing request could run its reuse
+    # chain-revoke query in the gap before this transaction's new token is
+    # committed, and miss revoking it - reopening a narrower version of the
+    # exact bug this fix targets.
     claim = db.execute(
         update(RefreshToken)
         .where(RefreshToken.id == token.id, RefreshToken.revoked_at.is_(None))
@@ -122,15 +131,25 @@ def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
         # Someone else already claimed/rotated this token first (lost a
         # concurrent race - by the time we got the row lock, theirs had
         # already committed), or this is a genuine reuse of an
-        # already-revoked token. Either way, treat it as reuse: revoke the
-        # user's whole active chain - we can no longer tell which branch is
-        # legitimate. Because the winning claim+mint+link below is one
-        # atomic transaction gated by the same row lock, if a winner exists
-        # its new token is guaranteed to already be committed and visible
-        # by the time we get here.
+        # already-revoked token (whether or not it has also expired since).
+        # Either way, treat it as reuse: revoke the user's whole active
+        # chain - we can no longer tell which branch is legitimate. Because
+        # the winning claim+mint+link below is one atomic transaction gated
+        # by the same row lock, if a winner exists its new token is
+        # guaranteed to already be committed and visible by the time we get
+        # here.
         db.rollback()
         _revoke_active_chain(db, token.user_id)
         raise HTTPException(status_code=401, detail="refresh token reuse detected")
+
+    if token.expires_at < datetime.now(timezone.utc):
+        # This token was never rotated or reused before now - it was simply
+        # never used again after issuance and its TTL ran out. We've already
+        # claimed/revoked it above, which is correct (an expired token
+        # shouldn't be usable to rotate anyway); just persist that and
+        # reject.
+        db.commit()
+        raise HTTPException(status_code=401, detail="refresh token expired")
 
     user = db.get(User, token.user_id)
     new_tokens = _issue_tokens(db, user, commit=False)

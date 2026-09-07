@@ -2,9 +2,11 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from app.main import app
 from app.db import SessionLocal, get_session
 from app.models.refresh_token import RefreshToken
+from app.auth.security import hash_token
 
 client = TestClient(app)
 
@@ -39,6 +41,45 @@ def test_logout_revokes_token():
     client.post("/auth/logout", json={"refresh_token": tokens["refresh_token"]})
     resp = client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert resp.status_code == 401
+
+
+def test_reuse_of_already_expired_revoked_token_still_revokes_chain():
+    """Regression test (round 2): a delayed-replay attack - steal a token,
+    wait out its own TTL, then replay it - must still be caught as reuse
+    and revoke the whole chain, not short-circuit into a bare "expired" 401
+    that skips chain revocation. This was the precedence bug: checking
+    expires_at before attempting the atomic claim let an
+    already-revoked-and-now-expired token bypass reuse detection entirely,
+    leaving its live sibling token (from the same chain) undetected."""
+    tokens = _register()
+    old_refresh = tokens["refresh_token"]
+
+    # Rotate normally: old_refresh's row becomes revoked, and a new live
+    # token is issued for the same chain.
+    first = client.post("/auth/refresh", json={"refresh_token": old_refresh})
+    assert first.status_code == 200
+
+    # Backdate the now-revoked original token's expires_at into the past,
+    # simulating an attacker replaying it long after it would have expired
+    # naturally anyway.
+    with SessionLocal() as db:
+        old_token_row = db.scalar(
+            select(RefreshToken).where(RefreshToken.token_hash == hash_token(old_refresh))
+        )
+        assert old_token_row.revoked_at is not None
+        old_token_row.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        db.commit()
+
+    # Replay the old, already-revoked-and-now-expired token.
+    resp = client.post("/auth/refresh", json={"refresh_token": old_refresh})
+    assert resp.status_code == 401
+
+    with SessionLocal() as db:
+        all_tokens = db.query(RefreshToken).all()
+        # The live token minted by the earlier legitimate rotation must also
+        # have been revoked by chain revocation - not just the replayed one.
+        assert len(all_tokens) == 2
+        assert all(t.revoked_at is not None for t in all_tokens)
 
 
 def test_reusing_same_old_token_after_rotation_is_caught_not_second_success():
