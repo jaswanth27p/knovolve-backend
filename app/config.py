@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     llm_retry_multiplier_seconds: float = 1.0
     llm_retry_max_delay_seconds: float = 30.0
     llm_retry_jitter_seconds: float = 0.5
+    # Observability. otel_enabled flips on traces, metrics and OTLP log export.
+    # When it is on, the process sends OTLP to otel_exporter_otlp_endpoint
+    # (host dev: http://localhost:4317; containerized: http://otel-collector:4317).
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
+    otel_service_name: str = "knovolve-backend"
+    otel_log_level: str = "INFO"
+    # Metrics namespace for prometheus-fastapi-instrumentator.
+    metrics_namespace: str = "fastapi"
+    # Sentry (self-hosted) DSN; empty string disables error tracking.
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.1
     # MinIO/S3-compatible object storage for diagram images.
     s3_endpoint: str = "http://localhost:9000"
     s3_public_endpoint: str = "http://localhost:9000"

@@ -2,7 +2,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
 from app.config import settings
+from app.observability import (
+    instrument_fastapi,
+    instrument_static,
+    setup_logging,
+    setup_metrics,
+    setup_sentry,
+    setup_tracing,
+)
 from app.routes.courses import router as courses_router
+
+setup_tracing()
+setup_logging()
+setup_sentry()
 
 app = FastAPI(title="Knovolve")
 app.add_middleware(
@@ -15,6 +27,10 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(courses_router)
+
+instrument_static()
+instrument_fastapi(app)
+setup_metrics(app)
 
 
 @app.get("/health")

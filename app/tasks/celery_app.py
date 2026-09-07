@@ -3,8 +3,20 @@ import os
 from celery import Celery
 
 from app.config import settings
+from app.observability import instrument_static, setup_logging, setup_tracing
+
+setup_tracing()
+setup_logging()
 
 celery_app = Celery("knovolve", broker=settings.redis_url, backend=settings.redis_url)
+
+# Register the concrete task modules so the documented worker invocation
+# (`celery -A app.tasks.celery_app worker --loglevel=info`) actually picks up
+# the jobs users enqueue. Without this the worker connects but has zero tasks.
+celery_app.conf.include = [
+    "app.tasks.course_creation_task",
+    "app.tasks.render_diagram_task",
+]
 
 # Crash-resumability: ack the message only after the task body finishes, so a
 # worker killed mid-run does not lose the job (the broker redelivers it once
@@ -23,3 +35,5 @@ celery_app.conf.update(
 # setting CELERY_TASK_ALWAYS_EAGER=1 in the environment before import.
 if os.environ.get("CELERY_TASK_ALWAYS_EAGER") == "1":
     celery_app.conf.task_always_eager = True
+
+instrument_static()
