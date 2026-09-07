@@ -2,6 +2,7 @@ import re
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.llm.factory import get_chat_model, embed
+from app.llm.prompts import CANONICALIZE_TOPIC_PROMPT
 from app.models.course import Course
 from app.agents.course_creation.state import CourseCreationState
 
@@ -12,10 +13,8 @@ def _slugify(title: str) -> str:
 
 def _canonicalize(topic_raw: str) -> str:
     model = get_chat_model("canonicalize_topic")
-    resp = model.invoke(
-        f"Rewrite this learning topic as a clean, canonical course title "
-        f"(3-6 words, no extra commentary, just the title): {topic_raw}"
-    )
+    messages = CANONICALIZE_TOPIC_PROMPT.format_messages(topic_raw=topic_raw)
+    resp = model.invoke(messages)
     return resp.content.strip()
 
 def normalize_topic(state: CourseCreationState, db: Session) -> CourseCreationState:

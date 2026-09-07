@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from app.llm.factory import get_chat_model
+from app.llm.prompts import BUILD_CONCEPT_GRAPH_PROMPT
 from app.agents.course_creation.state import CourseCreationState
 
 
@@ -26,10 +27,8 @@ def build_concept_graph(state: CourseCreationState) -> CourseCreationState:
         f"- {ch['title']} (module: {m['title']})"
         for m in state["modules"] for ch in m["chapters"]
     )
-    result = structured.invoke(
-        f"Given these chapters, list the key concepts taught (each tied to one "
-        f"chapter title) and prerequisite relationships between concepts:\n{chapters_summary}"
-    )
+    messages = BUILD_CONCEPT_GRAPH_PROMPT.format_messages(chapters_summary=chapters_summary)
+    result = structured.invoke(messages)
     return {
         **state,
         "concepts": [c.model_dump() for c in result.concepts],
