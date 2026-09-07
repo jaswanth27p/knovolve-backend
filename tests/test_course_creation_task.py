@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,7 +15,7 @@ from app.tasks.course_creation_task import (
 def _make_job(topic_slug="celery-test-topic", status="pending"):
     with SessionLocal() as db:
         job = CourseJob(topic_slug=topic_slug, topic_raw="Celery Test Topic",
-                          topic_embedding=[0.0] * 1024, status=status,
+                          topic_embedding=[1.0] + [0.0] * 1023, status=status,
                           created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
         db.add(job)
         db.commit()
@@ -162,3 +162,85 @@ def test_resume_uses_same_thread_id_as_job_id():
         run_course_creation_job(job_id)  # pyright: ignore[reportCallIssue]
         call_kwargs = mock_build.return_value.invoke.call_args.kwargs
         assert call_kwargs["config"]["configurable"]["thread_id"] == str(job_id)
+
+
+def test_transient_failure_resumes_on_next_attempt_without_regenerating(monkeypatch):
+    """Phase 2: a transient node error must leave an interrupted run that the
+    next celery attempt resumes from its checkpoint — re-executing only the
+    failed node (concept graph), not the already-generated outline/chapters."""
+    from contextlib import ExitStack
+
+    from app.config import settings
+    monkeypatch.setattr(settings, "llm_retry_max_attempts", 1)
+    monkeypatch.setattr(settings, "llm_retry_multiplier_seconds", 0.001)
+    monkeypatch.setattr(settings, "llm_retry_max_delay_seconds", 0.01)
+    monkeypatch.setattr(settings, "llm_retry_jitter_seconds", 0.0)
+
+    from app.agents.course_creation.nodes.generate_outline import ModuleDraft
+    from app.agents.course_creation.nodes.generate_chapters import ChapterDraft
+    from app.agents.course_creation.nodes.build_concept_graph import (
+        ConceptDraft,
+        ConceptGraphResponse,
+    )
+
+    FAKE = [1.0] + [0.0] * 1023
+    outline_model = MagicMock()
+    outline_model.with_structured_output.return_value.invoke.return_value = [
+        ModuleDraft(title="Basics", objective="o", order=1)
+    ]
+    chapters_model = MagicMock()
+    chapters_model.with_structured_output.return_value.invoke.return_value = [
+        ChapterDraft(title="Intro", objective="o", order=1)
+    ]
+    graph_model = MagicMock()
+    concept_invoke = graph_model.with_structured_output.return_value.invoke
+    concept_invoke.return_value = ConceptGraphResponse(
+        concepts=[ConceptDraft(name="C", chapter_title="Intro")], edges=[]
+    )
+    # First execution of the concept-graph node fails transiently; resume
+    # re-drives it to success.
+    concept_invoke.side_effect = [ConnectionError("llm down"), concept_invoke.return_value]
+
+    by_node = {
+        "generate_outline": outline_model,
+        "generate_chapters": chapters_model,
+        "build_concept_graph": graph_model,
+    }
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "app.agents.course_creation.nodes.normalize_topic.embed", return_value=FAKE
+    ))
+    stack.enter_context(patch(
+        "app.agents.course_creation.nodes.normalize_topic._canonicalize",
+        return_value="Resume Task Topic",
+    ))
+    for node in by_node:
+        stack.enter_context(patch(
+            f"app.agents.course_creation.nodes.{node}.get_chat_model",
+            side_effect=lambda n: by_node[n],
+        ))
+
+    job_id = _make_job(topic_slug="celery-resume-transient")
+    with stack:
+        with pytest.raises(ConnectionError):
+            run_course_creation_job(job_id)  # pyright: ignore[reportCallIssue]
+
+        with SessionLocal() as db:
+            job = db.get(CourseJob, job_id)
+            assert job is not None
+            assert job.status == "running"  # transient failure, not marked failed
+            assert job.error is None
+
+        # Second attempt (the celery redelivery/retry) resumes the interrupted
+        # run instead of regenerating.
+        run_course_creation_job(job_id)  # pyright: ignore[reportCallIssue]
+
+    assert outline_model.with_structured_output.return_value.invoke.call_count == 1
+    assert chapters_model.with_structured_output.return_value.invoke.call_count == 1
+    assert concept_invoke.call_count == 2
+
+    with SessionLocal() as db:
+        job = db.get(CourseJob, job_id)
+        assert job is not None
+        assert job.status == "succeeded"
+        assert db.query(Course).filter_by(topic_slug="celery-resume-transient").count() == 1

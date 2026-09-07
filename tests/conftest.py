@@ -9,6 +9,7 @@ def clean_db():
     with SessionLocal() as s:
         s.execute(text(
             "TRUNCATE refresh_tokens, users, concept_edges, concepts, chapters, "
-            "modules, course_jobs, courses RESTART IDENTITY CASCADE"
+            "modules, course_jobs, courses, checkpoint_writes, checkpoint_blobs, "
+            "checkpoints RESTART IDENTITY CASCADE"
         ))
         s.commit()

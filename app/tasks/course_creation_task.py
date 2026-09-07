@@ -26,12 +26,15 @@ from datetime import datetime, timezone
 
 from celery import Task
 from celery.exceptions import MaxRetriesExceededError
+from langchain_core.runnables import RunnableConfig
 
+from app.agents.course_creation.checkpoints import prune_old_checkpoints
 from app.agents.course_creation.graph import (
     CourseGenerationError,
     build_course_creation_graph,
 )
 from app.agents.course_creation.state import CourseCreationState
+from app.config import settings
 from app.db import SessionLocal
 from app.models.course import CourseJob
 from app.tasks.celery_app import celery_app
@@ -55,6 +58,36 @@ def _transient_retry_delay_seconds(task: Task) -> int:
         MAX_RETRY_DELAY_SECONDS,
         RETRY_BASE_DELAY_SECONDS * (2 ** task.request.retries),
     )
+
+
+def _invoke_generation(graph, initial_state: CourseCreationState, config: RunnableConfig,
+                       job_id: int) -> dict:
+    """Run the graph, resuming an interrupted prior run when one exists.
+
+    Every invoke uses synchronous durability so every completed superstep is
+    checkpointed before the next runs — that is what makes crash-resume
+    possible (a worker killed mid-run leaves a partially-written run whose
+    ``next`` node is pending).
+
+    If a previous attempt died mid-run (worker crash, or a transient node error
+    being retried by celery), ``get_state(...).next`` is non-empty and we
+    re-invoke with ``None`` input: langgraph re-drives only the still-pending
+    node from its checkpoint instead of regenerating the whole course. A fresh
+    thread (no checkpoint, or a completed run) invokes normally from
+    ``initial_state``.
+    """
+    try:
+        state = graph.get_state(config)
+    except Exception:  # noqa: BLE001 - a broken read must not block generation
+        state = None
+    if state is not None and bool(state.next):
+        logger.info(
+            "job %s: resuming interrupted run at %s instead of regenerating",
+            job_id,
+            list(state.next),
+        )
+        return graph.invoke(None, config=config, durability="sync")
+    return graph.invoke(initial_state, config=config, durability="sync")
 
 
 def _finalize_failed(db, job: CourseJob, exc: BaseException) -> None:
@@ -88,6 +121,16 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
         if job.status in ("succeeded", "failed"):
             return
 
+        # Opportunistic checkpoint hygiene: finished jobs' partial state rows
+        # age out, so the checkpoints tables don't grow forever. Failure to
+        # prune must never fail the job itself.
+        try:
+            prune_old_checkpoints(settings.checkpoint_retention_days)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "checkpoint pruning failed for job %s", job_id, exc_info=True
+            )
+
         job.status = "running"
         job.updated_at = datetime.now(timezone.utc)
         db.commit()
@@ -106,8 +149,11 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
 
         try:
             graph = build_course_creation_graph()
-            final_state = graph.invoke(
-                initial_state, config={"configurable": {"thread_id": str(job_id)}}
+            final_state = _invoke_generation(
+                graph,
+                initial_state,
+                {"configurable": {"thread_id": str(job_id)}},
+                job_id,
             )
         except CourseGenerationError as exc:
             # Content that exhausted its in-graph repair budget, or a persist

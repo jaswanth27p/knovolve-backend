@@ -271,14 +271,140 @@ def test_full_graph_short_circuits_on_existing_course():
 
 
 # --------------------------------------------------------------------------
+# Phase 2: checkpoint resume + lifecycle
+# --------------------------------------------------------------------------
+
+
+def test_graph_resumes_interrupted_run_without_regenerating(monkeypatch):
+    """A transient node failure must leave an interrupted run that beam relies
+    on: resuming with None input re-drives ONLY the failing node, reusing the
+    already-generated outline and chapters."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "llm_retry_max_attempts", 1)
+    monkeypatch.setattr(settings, "llm_retry_multiplier_seconds", 0.001)
+    monkeypatch.setattr(settings, "llm_retry_max_delay_seconds", 0.01)
+    monkeypatch.setattr(settings, "llm_retry_jitter_seconds", 0.0)
+    stack, by_node = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[ChapterDraft(title="Intro", objective="o", order=1)],
+        concept_graph=ConceptGraphResponse(
+            concepts=[ConceptDraft(name="C", chapter_title="Intro")], edges=[]
+        ),
+        canonical_title="Resume Graph Test",
+    )
+    concept_invoke = by_node["build_concept_graph"].with_structured_output.return_value.invoke
+    concept_invoke.side_effect = [ConnectionError("llm down"), concept_invoke.return_value]
+
+    with stack:
+        from langchain_core.runnables import RunnableConfig
+        app_graph = build_course_creation_graph()
+        config: RunnableConfig = {"configurable": {"thread_id": f"test-{uuid.uuid4()}"}}
+        with pytest.raises(ConnectionError):
+            app_graph.invoke(
+                _initial_state(1020, "resume graph"),
+                config=config,
+                durability="sync",
+            )
+        snapshot = app_graph.get_state(config)
+        assert list(snapshot.next) == ["build_concept_graph"]
+
+        final_state = app_graph.invoke(None, config=config, durability="sync")
+
+    assert final_state["error"] is None
+    assert final_state["existing_course_id"] is not None
+    # Only the concept-graph node was re-executed; outline/chapters reused.
+    assert by_node["generate_outline"].with_structured_output.return_value.invoke.call_count == 1
+    assert by_node["generate_chapters"].with_structured_output.return_value.invoke.call_count == 1
+    assert concept_invoke.call_count == 2
+
+
+def test_purge_checkpoints_clears_thread(monkeypatch):
+    from app.agents.course_creation.checkpoints import purge_checkpoints
+    from app.config import settings
+    monkeypatch.setattr(settings, "llm_retry_max_attempts", 1)
+    monkeypatch.setattr(settings, "llm_retry_multiplier_seconds", 0.001)
+    monkeypatch.setattr(settings, "llm_retry_max_delay_seconds", 0.01)
+    monkeypatch.setattr(settings, "llm_retry_jitter_seconds", 0.0)
+    stack, by_node = _patched_graph(
+        outline=[ModuleDraft(title="Basics", objective="o", order=1)],
+        chapters=[ChapterDraft(title="Intro", objective="o", order=1)],
+        concept_graph=ConceptGraphResponse(
+            concepts=[ConceptDraft(name="C", chapter_title="Intro")], edges=[]
+        ),
+        canonical_title="Purge Graph Test",
+    )
+    concept_invoke = by_node["build_concept_graph"].with_structured_output.return_value.invoke
+    concept_invoke.side_effect = [ConnectionError("llm down")]
+
+    with stack:
+        from langchain_core.runnables import RunnableConfig
+        app_graph = build_course_creation_graph()
+        thread_id = f"test-{uuid.uuid4()}"
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        with pytest.raises(ConnectionError):
+            app_graph.invoke(
+                _initial_state(1021, "purge graph"),
+                config=config,
+                durability="sync",
+            )
+        assert list(app_graph.get_state(config).next) == ["build_concept_graph"]
+
+        purge_checkpoints(thread_id)
+
+        snapshot = app_graph.get_state(config)
+        assert list(snapshot.next) == []
+        # No checkpointer row remains, so there is no checkpoint_id to resume
+        # from — a fresh run is forced.
+        configurable = snapshot.config.get("configurable", {}) if snapshot.config else {}
+        assert "checkpoint_id" not in configurable
+
+
+def test_prune_old_checkpoints_only_touches_finished_jobs():
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text
+    from app.agents.course_creation.checkpoints import prune_old_checkpoints
+    from app.models.course import CourseJob
+
+    def _seed_job(status, slug, days_old):
+        with SessionLocal() as db:
+            job = CourseJob(
+                topic_slug=slug, topic_raw=slug, topic_embedding=[1.0] + [0.0] * 1023,
+                status=status, created_at=datetime.now(timezone.utc) - timedelta(days=days_old),
+                updated_at=datetime.now(timezone.utc) - timedelta(days=days_old),
+            )
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+            return str(job.id)
+
+    def _seed_checkpoint(thread_id: str) -> None:
+        with SessionLocal() as db:
+            db.execute(text(
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
+                "parent_checkpoint_id, type, checkpoint, metadata) "
+                "VALUES (:tid, '', :cid, NULL, 'channel_values', '{}'::jsonb, '{}'::jsonb)"
+            ), {"tid": thread_id, "cid": f"{uuid.uuid4()}"})
+            db.commit()
+
+    old_finished = _seed_job("succeeded", "prune-old-finished", days_old=30)
+    running = _seed_job("running", "prune-running-keep", days_old=30)
+    _seed_checkpoint(old_finished)
+    _seed_checkpoint(running)
+
+    pruned = prune_old_checkpoints(retention_days=7)
+
+    assert pruned == 1
+    with SessionLocal() as db:
+        assert db.execute(text(
+            "SELECT COUNT(*) FROM checkpoints WHERE thread_id = :tid"
+        ), {"tid": old_finished}).scalar() == 0
+        assert db.execute(text(
+            "SELECT COUNT(*) FROM checkpoints WHERE thread_id = :tid"
+        ), {"tid": running}).scalar() == 1
+
+
+# --------------------------------------------------------------------------
 # Retry cap
-#
-# The plan's original `_route_after_validate` incremented `_retry_counts` by
-# mutating the state dict inside the conditional-edge function. Verified
-# against langgraph 1.2.11: those mutations are discarded (the state mapping is
-# rebuilt from channel values each step), so the cap never tripped and the
-# graph looped until GraphRecursionError. Counting now happens in the
-# validate_course node and is returned as a state update. These tests pin that.
 # --------------------------------------------------------------------------
 
 

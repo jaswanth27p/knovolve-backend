@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # Celery broker: how long a crashed worker's message stays invisible before
     # redelivery. Must comfortably exceed the longest single graph run.
     celery_visibility_timeout_seconds: int = 6 * 60 * 60
+    # LangGraph checkpoints (partial run state) for finished jobs are pruned
+    # after this many days; running jobs' checkpoints are never pruned.
+    checkpoint_retention_days: int = 7
     # Exponential backoff for external LLM/embedding calls (tenacity). These are
     # workflow-scoped knobs today; they are read from Settings so a global policy
     # can reuse the same values later.

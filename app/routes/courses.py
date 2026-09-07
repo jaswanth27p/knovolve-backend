@@ -14,6 +14,7 @@ from app.agents.course_creation.nodes.normalize_topic import (
     find_existing,
 )
 from app.llm.factory import embed
+from app.agents.course_creation.checkpoints import purge_checkpoints
 from app.tasks.course_creation_task import run_course_creation_job
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,10 @@ def retry_job(job_id: int, response: Response, db: Session = Depends(get_session
     job.error = None
     job.updated_at = datetime.now(timezone.utc)
     db.commit()
+    # A human-triggered retry must regenerate fresh, not blindly re-drive the
+    # node that failed last time — drop the interrupted run's checkpoints so
+    # the next invocation starts from scratch.
+    purge_checkpoints(str(job_id))
     # Same .delay blind-spot as create_course above.
     run_course_creation_job.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return CourseJobResponse(status="pending", job_id=job.id)
