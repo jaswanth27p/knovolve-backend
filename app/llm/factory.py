@@ -12,6 +12,7 @@ def get_chat_model(node: str) -> ChatOpenAI:
         base_url=provider["base_url"],
         api_key=SecretStr(getattr(settings, provider["settings_field"])),
         model=cfg["model"],
+        request_timeout=settings.llm_request_timeout_seconds,  # pyright: ignore[reportCallIssue]
     )
 
 def _embeddings_client() -> OpenAIEmbeddings:
@@ -20,6 +21,7 @@ def _embeddings_client() -> OpenAIEmbeddings:
         base_url=provider["base_url"],
         api_key=SecretStr(getattr(settings, provider["settings_field"])),
         model=EMBEDDING_NODE["model"],
+        request_timeout=settings.llm_request_timeout_seconds,  # pyright: ignore[reportCallIssue]
     )
 
 def embed(text: str) -> list[float]:

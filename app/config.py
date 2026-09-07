@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     # Celery broker: how long a crashed worker's message stays invisible before
     # redelivery. Must comfortably exceed the longest single graph run.
     celery_visibility_timeout_seconds: int = 6 * 60 * 60
+    # Hard cap on a single task run (the whole graph). A non-returning LLM call
+    # cannot be rescued by tenacity, so the worker must eventually kill the
+    # task; acks_late then redelivers it and the run resumes from its last
+    # checkpoint instead of starting over.
+    celery_task_time_limit_seconds: int = 30 * 60
+    # Per-call timeout for every LLM/embedding request, so a hung provider call
+    # fails (and retries/backoff) instead of blocking the graph indefinitely.
+    llm_request_timeout_seconds: float = 120.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.
     checkpoint_retention_days: int = 7

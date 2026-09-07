@@ -13,6 +13,7 @@ celery_app = Celery("knovolve", broker=settings.redis_url, backend=settings.redi
 # graph run to avoid double-execution while a healthy run is still going.
 celery_app.conf.update(
     task_acks_late=True,
+    task_time_limit=settings.celery_task_time_limit_seconds,
     broker_transport_options={
         "visibility_timeout": settings.celery_visibility_timeout_seconds
     },
