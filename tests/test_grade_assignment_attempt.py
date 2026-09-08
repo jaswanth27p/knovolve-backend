@@ -7,7 +7,7 @@ from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.user import User
 from app.models.learner_streak import LearnerStreak
-from app.agents.evaluation.nodes.grade_free_text_answers import AnswerGrade
+from app.agents.evaluation.nodes.grade_assignment_answers import AnswerGrade, GradingResponse
 from app.agents.evaluation.grade import grade_assignment_attempt
 from app.tasks.evaluation_tasks import grade_assignment_attempt_task
 
@@ -64,7 +64,15 @@ def _make_attempt(db, assignment_id: int, answers: dict[int, str]) -> int:
     return attempt.id
 
 
-def test_grades_mcq_and_true_false_by_exact_match_no_llm_call():
+def _chapter_id_for_assignment(db, assignment_id: int) -> int:
+    assignment = db.get(Assignment, assignment_id)
+    assert assignment is not None and assignment.chapter_content_id is not None
+    content = db.get(ChapterContent, assignment.chapter_content_id)
+    assert content is not None
+    return content.chapter_id
+
+
+def test_grades_mcq_and_true_false_deterministically_llm_called_for_verdict_only():
     with SessionLocal() as db:
         assignment_id = _make_assignment_with_questions(db, "grade-a", [
             {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
@@ -72,20 +80,31 @@ def test_grades_mcq_and_true_false_by_exact_match_no_llm_call():
         ])
         attempt_id = _make_attempt(db, assignment_id, {0: "a", 1: "false"})
 
-    with patch("app.agents.evaluation.grade.grade_free_text_answers") as mock_grade_free_text:
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=[],
+                                     verdict_reasoning="Both deterministic answers graded; nothing to remediate.")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response) as mock_grader:
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)
 
-    mock_grade_free_text.assert_not_called()
+    # The LLM node is still called (for the holistic verdict) even though
+    # there are zero free-text questions — spec 03 requires this.
+    mock_grader.assert_called_once()
+    free_text_arg, known_arg = mock_grader.call_args.args
+    assert free_text_arg == []
+    assert len(known_arg) == 2  # both mcq and true_false passed as known-answer context
+
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
         assert attempt is not None
         assert attempt.status == "graded"
         assert attempt.overall_score == 0.5
+        assert attempt.verdict_reasoning == "Both deterministic answers graded; nothing to remediate."
         answers = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).order_by(AssignmentAnswer.question_id).all()
         assert answers[0].is_correct is True
         assert answers[1].is_correct is False
         assert answers[0].graded_at is not None
+        assert answers[0].misconception_tag is None
+        assert answers[1].misconception_tag is None
 
 
 def test_exact_match_is_case_insensitive_and_trimmed():
@@ -95,8 +114,10 @@ def test_exact_match_is_case_insensitive_and_trimmed():
         ])
         attempt_id = _make_attempt(db, assignment_id, {0: "  true  "})
 
-    with SessionLocal() as db:
-        grade_assignment_attempt(attempt_id, db)
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=[], verdict_reasoning="ok")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response):
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
 
     with SessionLocal() as db:
         answer = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).one()
@@ -113,24 +134,32 @@ def test_free_text_answers_batched_into_one_llm_call():
         questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).order_by(AssignmentQuestion.order).all()
         q0_id, q1_id = questions[0].id, questions[1].id
 
-    fake_grades = [
-        AnswerGrade(question_id=q0_id, is_correct=True, feedback="Correct."),
-        AnswerGrade(question_id=q1_id, is_correct=False, feedback="Incorrect."),
-    ]
-    with patch("app.agents.evaluation.grade.grade_free_text_answers", return_value=fake_grades) as mock_grade_free_text:
+    fake_response = GradingResponse(
+        grades=[
+            AnswerGrade(question_id=q0_id, is_correct=True, feedback="Correct."),
+            AnswerGrade(question_id=q1_id, is_correct=False, feedback="Incorrect.", misconception_tag="skipped-the-question"),
+        ],
+        remediation_concept_tags=[], verdict_reasoning="Partially correct.",
+    )
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response) as mock_grader:
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)
 
-    mock_grade_free_text.assert_called_once()
-    assert len(mock_grade_free_text.call_args.args[0]) == 2  # both items in one batched call
+    mock_grader.assert_called_once()
+    free_text_arg, known_arg = mock_grader.call_args.args
+    assert len(free_text_arg) == 2  # both items in one batched call
+    assert known_arg == []
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
         assert attempt is not None
         assert attempt.overall_score == 0.5
+        assert attempt.verdict_reasoning == "Partially correct."
         answers = {a.question_id: a for a in db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all()}
         assert answers[q0_id].is_correct is True
         assert answers[q0_id].feedback == "Correct."
+        assert answers[q0_id].misconception_tag is None
         assert answers[q1_id].is_correct is False
+        assert answers[q1_id].misconception_tag == "skipped-the-question"
 
 
 def test_mixed_mcq_and_free_text_in_one_attempt():
@@ -143,15 +172,20 @@ def test_mixed_mcq_and_free_text_in_one_attempt():
         questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).order_by(AssignmentQuestion.order).all()
         free_text_question_id = questions[1].id
 
-    fake_grades = [AnswerGrade(question_id=free_text_question_id, is_correct=True, feedback="Correct.")]
-    with patch("app.agents.evaluation.grade.grade_free_text_answers", return_value=fake_grades) as mock_grade_free_text:
+    fake_response = GradingResponse(
+        grades=[AnswerGrade(question_id=free_text_question_id, is_correct=True, feedback="Correct.")],
+        remediation_concept_tags=[], verdict_reasoning="All good.",
+    )
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response) as mock_grader:
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)
 
-    # Only the free_text item is sent to the LLM — mcq graded without it.
-    sent_items = mock_grade_free_text.call_args.args[0]
-    assert len(sent_items) == 1
-    assert sent_items[0].question_id == free_text_question_id
+    # Only the free_text item is sent for grading — the mcq item is passed as known-answer context, not re-graded.
+    free_text_arg, known_arg = mock_grader.call_args.args
+    assert len(free_text_arg) == 1
+    assert free_text_arg[0].question_id == free_text_question_id
+    assert len(known_arg) == 1
+    assert known_arg[0].is_correct is True
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
         assert attempt is not None
@@ -166,7 +200,7 @@ def test_failure_marks_attempt_failed_with_no_answers_graded():
         ])
         attempt_id = _make_attempt(db, assignment_id, {0: "a", 1: "X is Y"})
 
-    with patch("app.agents.evaluation.grade.grade_free_text_answers", side_effect=RuntimeError("llm down")):
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", side_effect=RuntimeError("llm down")):
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)
 
@@ -176,7 +210,8 @@ def test_failure_marks_attempt_failed_with_no_answers_graded():
         assert attempt.status == "failed"
         assert attempt.error == "llm down"
         assert attempt.overall_score is None
-        # The mcq answer was graded in-session before the free_text call failed —
+        assert attempt.verdict_reasoning is None
+        # The mcq answer was graded in-session before the LLM call failed —
         # rollback must undo it too. All-or-nothing on the graded fields.
         answers = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all()
         assert all(a.is_correct is None for a in answers)
@@ -195,8 +230,11 @@ def test_partial_llm_grades_marks_attempt_failed_with_no_answers_graded():
         q1_id, q2_id = questions[1].id, questions[2].id
 
     # Only q1 gets a grade back; q2's question_id is missing from the LLM response.
-    partial_grades = [AnswerGrade(question_id=q1_id, is_correct=True, feedback="Correct.")]
-    with patch("app.agents.evaluation.grade.grade_free_text_answers", return_value=partial_grades):
+    partial_response = GradingResponse(
+        grades=[AnswerGrade(question_id=q1_id, is_correct=True, feedback="Correct.")],
+        remediation_concept_tags=[], verdict_reasoning="n/a",
+    )
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=partial_response):
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)
 
@@ -225,11 +263,11 @@ def test_idempotent_when_not_in_grading_status():
         attempt.overall_score = 1.0
         db.commit()
 
-    with patch("app.agents.evaluation.grade.grade_free_text_answers") as mock_grade_free_text:
+    with patch("app.agents.evaluation.grade.grade_assignment_answers") as mock_grader:
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)  # already graded — must no-op
 
-    mock_grade_free_text.assert_not_called()
+    mock_grader.assert_not_called()
 
 
 def test_task_wrapper_invokes_grading():
@@ -246,6 +284,86 @@ def test_task_wrapper_invokes_grading():
     assert mock_grade.call_args.args[0] == attempt_id
 
 
+def test_remediation_dispatched_for_chapter_level_attempt_with_remediation_tags():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-remediate-a", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "wrong"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        user_id = attempt.user_id
+        chapter_id = _chapter_id_for_assignment(db, assignment_id)
+
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=["t1"], verdict_reasoning="Missed t1.")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response), \
+         patch("app.agents.evaluation.grade.remediate_chapter_task") as mock_remediate_task:
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    mock_remediate_task.delay.assert_called_once_with(chapter_id, user_id, ["t1"], attempt_id)
+
+
+def test_remediation_not_dispatched_when_remediation_tags_empty():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-remediate-b", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "a"})
+
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=[], verdict_reasoning="All good.")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response), \
+         patch("app.agents.evaluation.grade.remediate_chapter_task") as mock_remediate_task:
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    mock_remediate_task.delay.assert_not_called()
+
+
+def test_remediation_never_dispatched_for_module_level_attempt():
+    with SessionLocal() as db:
+        course = Course(topic_slug="grade-remediate-c", topic_raw="grade-remediate-c",
+                         topic_embedding=[0.0] * 2048, created_at=_now())
+        db.add(course)
+        db.flush()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.flush()
+        assignment = Assignment(level="module", module_id=module.id, scope="global",
+                                 status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.flush()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="q",
+                                       options=["a", "b"], correct_answer="a", explanation="e",
+                                       concept_tag="t1", difficulty="easy")
+        db.add(question)
+        db.flush()
+        user = User(email="grade-remediate-c@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        attempt = AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="grading",
+                                     created_at=_now(), updated_at=_now())
+        db.add(attempt)
+        db.flush()
+        db.add(AssignmentAnswer(attempt_id=attempt.id, question_id=question.id, concept_tag="t1", user_answer="wrong"))
+        db.commit()
+        attempt_id = attempt.id
+
+    # Even though the LLM says t1 warrants remediation, module-level
+    # assignments never dispatch it — Trigger A (chapter-level) only.
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=["t1"], verdict_reasoning="Missed t1.")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response), \
+         patch("app.agents.evaluation.grade.remediate_chapter_task") as mock_remediate_task:
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    mock_remediate_task.delay.assert_not_called()
+    with SessionLocal() as db:
+        attempt_after = db.get(AssignmentAttempt, attempt_id)
+        assert attempt_after is not None
+        assert attempt_after.status == "graded"  # still grades normally, just no dispatch
+
+
 def test_successful_grading_records_streak_activity():
     with SessionLocal() as db:
         assignment_id = _make_assignment_with_questions(db, "grade-streak-a", [
@@ -256,8 +374,10 @@ def test_successful_grading_records_streak_activity():
         assert attempt is not None
         user_id = attempt.user_id
 
-    with SessionLocal() as db:
-        grade_assignment_attempt(attempt_id, db)
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=[], verdict_reasoning="ok")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response):
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
 
     with SessionLocal() as db:
         streak = db.query(LearnerStreak).filter_by(user_id=user_id).one()
@@ -275,7 +395,7 @@ def test_failed_grading_does_not_record_streak_activity():
         assert attempt is not None
         user_id = attempt.user_id
 
-    with patch("app.agents.evaluation.grade.grade_free_text_answers", side_effect=RuntimeError("llm down")):
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", side_effect=RuntimeError("llm down")):
         with SessionLocal() as db:
             grade_assignment_attempt(attempt_id, db)
 
@@ -285,12 +405,10 @@ def test_failed_grading_does_not_record_streak_activity():
 
 
 def test_second_grading_same_day_same_user_updates_existing_streak_row():
-    """Regression test for the streak create-branch race (Finding 1): grading
-    two attempts for the SAME user on the SAME UTC day must go through
-    record_activity's update branch (day_gap == 0) the second time, not
-    attempt a second insert. Also exercises that update branch through the
-    real grading trigger path, which no other test in this file does — every
-    other streak test here only ever produces a first ("create") row."""
+    """Grading two attempts for the SAME user on the SAME UTC day must go
+    through record_activity's update branch (day_gap == 0) the second time,
+    not attempt a second insert. Also exercises that update branch through
+    the real grading trigger path."""
     with SessionLocal() as db:
         user = User(email="grade-streak-same-day@example.com", password_hash="x")
         db.add(user)
@@ -318,11 +436,12 @@ def test_second_grading_same_day_same_user_updates_existing_streak_row():
         db.commit()
         attempt1_id, attempt2_id = attempt1.id, attempt2.id
 
-    with SessionLocal() as db:
-        grade_assignment_attempt(attempt1_id, db)
-
-    with SessionLocal() as db:
-        grade_assignment_attempt(attempt2_id, db)
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=[], verdict_reasoning="ok")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response):
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt1_id, db)
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt2_id, db)
 
     with SessionLocal() as db:
         attempt1_after = db.get(AssignmentAttempt, attempt1_id)
@@ -348,7 +467,7 @@ def test_idempotent_regrade_does_not_double_record_streak_activity():
         db.commit()
 
     with SessionLocal() as db:
-        grade_assignment_attempt(attempt_id, db)  # already graded — must no-op, including streak
+        grade_assignment_attempt(attempt_id, db)  # already graded — must no-op, including streak (early-return guard fires before any grader call, so no mock needed here)
 
     with SessionLocal() as db:
         streak = db.query(LearnerStreak).filter_by(user_id=user_id).one_or_none()
