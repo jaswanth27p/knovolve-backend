@@ -92,6 +92,7 @@ def test_answer_defaults_ungraded():
         assert answer.is_correct is None
         assert answer.feedback is None
         assert answer.graded_at is None
+        assert answer.misconception_tag is None
 
 
 def test_attempt_defaults_grading_status_and_null_score():
@@ -107,3 +108,4 @@ def test_attempt_defaults_grading_status_and_null_score():
         db.refresh(attempt)
         assert attempt.status == "grading"
         assert attempt.overall_score is None
+        assert attempt.verdict_reasoning is None

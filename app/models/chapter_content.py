@@ -20,6 +20,8 @@ class ChapterContent(Base):
     # ChapterContentSection rows from their `order` index).
     outline: Mapped[list] = mapped_column(JSONB, default=list)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remediation_target_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # list[str]; None for V1, the exact remediation_concept_tags that triggered this version for V2+
+    remediation_source_attempt_id: Mapped[int | None] = mapped_column(ForeignKey("assignment_attempts.id"), nullable=True)  # which graded attempt's verdict triggered this version; None for V1
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -29,6 +31,18 @@ class ChapterContent(Base):
             "chapter_id", "version",
             unique=True,
             postgresql_where=(scope == "global"),
+        ),
+        Index(
+            "ix_chapter_contents_one_user_version_per_chapter",
+            "chapter_id", "user_id", "version",
+            unique=True,
+            postgresql_where=(scope == "user"),
+        ),
+        Index(
+            "ix_chapter_contents_unique_remediation_source",
+            "remediation_source_attempt_id",
+            unique=True,
+            postgresql_where=remediation_source_attempt_id.isnot(None),
         ),
     )
 

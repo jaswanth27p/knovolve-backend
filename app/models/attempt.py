@@ -12,6 +12,7 @@ class AssignmentAttempt(Base):
     status: Mapped[str] = mapped_column(String(16), default="grading")  # grading|graded|failed
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # fraction correct, null until graded
+    verdict_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)  # LLM's holistic reasoning for the pass/fail + remediation-targeting verdict; None until graded
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -25,6 +26,7 @@ class AssignmentAnswer(Base):
     user_answer: Mapped[str] = mapped_column(Text)
     is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # null until graded
     feedback: Mapped[str | None] = mapped_column(Text, nullable=True)  # LLM explanation (free_text) or canned message (mcq/true_false)
+    misconception_tag: Mapped[str | None] = mapped_column(String(255), nullable=True)  # LLM-identified misconception behind a wrong free_text answer; None for mcq/true_false or a correct answer
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
