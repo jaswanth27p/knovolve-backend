@@ -97,7 +97,10 @@ def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobRes
     existing = find_existing(embedding, db)
     if existing is not None:
         if isinstance(existing, Course):
-            touch_enrollment(db, user_id, _db_course(db, existing))
+            existing_course = _db_course(db, existing)
+            if existing_course is None:
+                raise HTTPException(status_code=500, detail="existing course not found")
+            touch_enrollment(db, user_id, existing_course)
         return _existing_response(existing, db)
 
     job = CourseJob(
