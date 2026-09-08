@@ -16,6 +16,7 @@ celery_app = Celery("knovolve", broker=settings.redis_url, backend=settings.redi
 celery_app.conf.include = [
     "app.tasks.course_creation_task",
     "app.tasks.render_diagram_task",
+    "app.tasks.assignment_tasks",
 ]
 
 # Crash-resumability: ack the message only after the task body finishes, so a
