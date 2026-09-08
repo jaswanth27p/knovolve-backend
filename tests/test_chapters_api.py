@@ -43,7 +43,7 @@ def test_content_endpoint_streams_ndjson_events():
          "diagram_status": None, "diagram_image_url": None},
         {"type": "done"},
     ]
-    with patch("app.routes.courses.stream_chapter_content", return_value=iter(fake_events)):
+    with patch("app.services.chapter_content.stream_chapter_content", return_value=iter(fake_events)):
         resp = client.get(f"/courses/{slug}/chapters/{chapter_id}/content",
                            headers={"Authorization": f"Bearer {token}"})
 
@@ -98,8 +98,8 @@ def test_content_endpoint_tails_redis_for_pending_diagram():
     # the endpoint reconciles pending diagrams -- it must pick that up
     # immediately rather than waiting on a redis message that will never come
     # in this test (no worker is running).
-    with patch("app.routes.courses.stream_chapter_content", return_value=iter(fake_events)), \
-         patch("app.routes.courses.redis.Redis.from_url") as mock_from_url:
+    with patch("app.services.chapter_content.stream_chapter_content", return_value=iter(fake_events)), \
+         patch("app.services.chapter_content.redis.Redis.from_url") as mock_from_url:
         mock_from_url.return_value.pubsub.return_value.get_message.return_value = None
         resp = client.get(f"/courses/{slug}/chapters/{chapter_id}/content",
                            headers={"Authorization": f"Bearer {token}"})

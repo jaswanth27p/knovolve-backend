@@ -113,7 +113,7 @@ def test_chapter_open_enrolls_user():
 
     # Chapter content endpoint: patch the generator to avoid any real LLM work.
     fake_events = [{"type": "done"}]
-    with patch("app.routes.courses.stream_chapter_content", return_value=iter(fake_events)):
+    with patch("app.services.chapter_content.stream_chapter_content", return_value=iter(fake_events)):
         resp = client.get(f"/courses/enroll-c/chapters/{chapter_id}/content", headers=headers)
     assert resp.status_code == 200
     with SessionLocal() as db:

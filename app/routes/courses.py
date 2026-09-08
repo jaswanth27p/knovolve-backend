@@ -1,26 +1,21 @@
 import json
-import time
 from datetime import datetime, timezone
 from typing import Iterator
-import redis
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.config import settings
 from app.db import get_session
-from app.services import courses
+from app.services import chapter_content, courses
 from app.services.enrollment import touch_enrollment
 from app.auth.dependencies import get_current_user
 from app.models.course import Course, Module, Chapter
-from app.models.chapter_content import ChapterContent, ChapterContentSection
+from app.models.chapter_content import ChapterContent
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.schemas.course import CreateCourseRequest, CourseJobResponse, PublicCourseResponse
 from app.schemas.assignment import AssignmentQuestionResponse, AssignmentResponse
 from app.schemas.attempt import SubmitAttemptRequest, AttemptSubmitResponse, AnswerResult, ConceptScore, AttemptResponse
-from app.agents.chapter_content.generate import stream_chapter_content
-from app.realtime.chapter_content_events import channel_name
 from app.tasks.assignment_tasks import generate_chapter_assignment_task, generate_module_assignment_task
 from app.tasks.evaluation_tasks import grade_assignment_attempt_task
 
@@ -62,110 +57,21 @@ def get_course(slug: str, db: Session = Depends(get_session), user=Depends(get_c
     return courses.serialize_course(db, course)
 
 
-def _tail_pending_diagrams(chapter_content_id: int, pending_orders: set[int], db: Session) -> Iterator[str]:
-    # Subscribe BEFORE draining/scanning. Redis pub/sub delivers only to live
-    # subscribers, and the render task commits Postgres *before* it publishes, so:
-    #   - anything committed before our SUBSCRIBE is invisible to the channel but
-    #     caught by the periodic DB reconcile below;
-    #   - anything committed after our SUBSCRIBE is delivered to us on the channel.
-    # The old order (reconcile-then-subscribe) left a window — a diagram finishing
-    # between the two was missed by both paths and stuck "pending" forever.
-    client = redis.Redis.from_url(settings.redis_url)
-    pubsub = client.pubsub()
-    pubsub.subscribe(channel_name(chapter_content_id))
-    deadline = time.monotonic() + settings.diagram_stream_timeout_seconds
-    try:
-        while pending_orders:
-            resolved = _reconcile_pending_diagrams(chapter_content_id, pending_orders, db)
-            for event in resolved:
-                yield json.dumps(event) + "\n"
-            if not pending_orders:
-                break
-            if time.monotonic() >= deadline:
-                break
-            message = pubsub.get_message(timeout=min(1.0, deadline - time.monotonic()))
-            if message is None or message["type"] != "message":
-                continue
-            event = json.loads(message["data"])
-            order = event.get("order")
-            if order in pending_orders and event["type"] in ("diagram_ready", "diagram_failed"):
-                yield json.dumps(event) + "\n"
-                pending_orders.discard(order)
-    finally:
-        pubsub.close()
-
-    # Final chance to reconcile (e.g. a diagram that resolved just as the deadline
-    # hit and whose publish happened before our subscribe). Cheap, idempotent.
-    for event in _reconcile_pending_diagrams(chapter_content_id, pending_orders, db):
-        yield json.dumps(event) + "\n"
-
-
-def _reconcile_pending_diagrams(chapter_content_id: int, pending_orders: set[int],
-                                db: Session) -> list[dict]:
-    """Resolve any pending diagram orders whose DB status has since moved to
-    ready/failed (their publish may predate our subscribe). Returns the events
-    to emit and mutates `pending_orders` to remove resolved orders."""
-    events: list[dict] = []
-    sections = db.scalars(
-        select(ChapterContentSection).where(
-            ChapterContentSection.chapter_content_id == chapter_content_id,
-            ChapterContentSection.order.in_(pending_orders),
-        )
-    )
-    for section in sections:
-        if section.diagram_status == "ready":
-            events.append({"type": "diagram_ready", "order": section.order,
-                           "diagram_image_url": section.diagram_image_url})
-            pending_orders.discard(section.order)
-        elif section.diagram_status == "failed":
-            events.append({"type": "diagram_failed", "order": section.order})
-            pending_orders.discard(section.order)
-    return events
-
-
 @router.get("/{slug}/chapters/{chapter_id}/content")
 def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_session),
-                          user=Depends(get_current_user)):
-    course = db.scalar(select(Course).where(Course.topic_slug == slug))
-    if not course:
-        raise HTTPException(status_code=404, detail="course not found")
-    chapter = (
-        db.query(Chapter)
-        .join(Module, Chapter.module_id == Module.id)
-        .filter(Chapter.id == chapter_id, Module.course_id == course.id)
-        .first()
-    )
-    if not chapter:
-        raise HTTPException(status_code=404, detail="chapter not found")
+                        user=Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    chapter = chapter_content.get_chapter(db, course, chapter_id)
     touch_enrollment(db, user.id, course)
 
-    def _generate() -> Iterator[str]:
-        pending_orders: set[int] = set()
-        terminal: dict | None = None
-        for event in stream_chapter_content(chapter, db):
-            if event["type"] in ("done", "error"):
-                # Hold the terminal event until after any pending-diagram tail so
-                # the stream emits exactly one terminal ("done"|"error").
-                terminal = event
-                break
+    def _encode(events: Iterator[dict]) -> Iterator[str]:
+        for event in events:
             yield json.dumps(event) + "\n"
-            if event["type"] == "section_ready" and event["diagram_status"] == "pending":
-                pending_orders.add(event["order"])
 
-        if pending_orders and terminal and terminal["type"] == "done":
-            # Only tail on a clean finish. If generation errored, the chapter is
-            # failed and any earlier sections' diagrams are best resolved on the
-            # next open's DB replay — blocking up to the timeout to hear about
-            # them would only delay surfacing the error to the user.
-            content = db.scalar(
-                select(ChapterContent).where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global")
-            )
-            if content is not None:
-                yield from _tail_pending_diagrams(content.id, pending_orders, db)
-
-        yield json.dumps(terminal or {"type": "done"}) + "\n"
-
-    return StreamingResponse(_generate(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _encode(chapter_content.stream_content_events(chapter, db)),
+        media_type="application/x-ndjson",
+    )
 
 
 def _chapter_assignment(db: Session, chapter_content_id: int) -> Assignment | None:
