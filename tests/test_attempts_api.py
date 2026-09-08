@@ -7,6 +7,7 @@ from app.models.course import Course, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
+from app.models.user import User
 
 client = TestClient(app)
 
@@ -21,7 +22,8 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _make_ready_assignment(slug: str, question_count: int = 2, status: str = "ready") -> tuple[str, int, list[int]]:
+def _make_ready_assignment(slug: str, question_count: int = 2, status: str = "ready",
+                            scope: str = "global") -> tuple[str, int, list[int]]:
     """Returns (course_slug, assignment_id, question_ids)."""
     with SessionLocal() as db:
         course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=_now())
@@ -37,7 +39,7 @@ def _make_ready_assignment(slug: str, question_count: int = 2, status: str = "re
                                   outline=[], created_at=_now(), updated_at=_now())
         db.add(content)
         db.commit()
-        assignment = Assignment(level="chapter", chapter_content_id=content.id, scope="global",
+        assignment = Assignment(level="chapter", chapter_content_id=content.id, scope=scope,
                                  status=status, created_at=_now(), updated_at=_now())
         db.add(assignment)
         db.commit()
@@ -65,6 +67,38 @@ def test_submit_404_when_assignment_not_ready():
         json={"answers": [{"question_id": qid, "answer": "a"} for qid in question_ids]},
         headers=headers,
     )
+    assert resp.status_code == 404
+
+
+def test_submit_404_when_assignment_is_user_scoped_not_global():
+    # A scope="user" assignment must never be reachable through this route today
+    # (V1 only generates scope="global" assignments) — the lookup filters on
+    # scope="global" the same way _chapter_assignment/_module_assignment do,
+    # so a non-global assignment 404s just like a missing one.
+    headers = _auth_headers("att-api-scope@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-scope", question_count=1, scope="user")
+    resp = client.post(
+        f"/courses/{slug}/assignments/{assignment_id}/attempts",
+        json={"answers": [{"question_id": qid, "answer": "a"} for qid in question_ids]},
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+
+def test_get_attempt_404_when_assignment_is_user_scoped_not_global():
+    # Same scope guard as the submit route, exercised via a raw AssignmentAttempt
+    # row (bypassing the submit route, since it would itself 404 on this assignment).
+    headers = _auth_headers("att-api-scope-get@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-scope-get", question_count=1, scope="user")
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(email="att-api-scope-get@example.com").one()
+        attempt = AssignmentAttempt(assignment_id=assignment_id, user_id=user.id, status="graded",
+                                     overall_score=1.0, created_at=_now(), updated_at=_now())
+        db.add(attempt)
+        db.commit()
+        attempt_id = attempt.id
+
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=headers)
     assert resp.status_code == 404
 
 

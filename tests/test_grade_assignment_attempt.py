@@ -178,6 +178,34 @@ def test_failure_marks_attempt_failed_with_no_answers_graded():
         assert all(a.graded_at is None for a in answers)
 
 
+def test_partial_llm_grades_marks_attempt_failed_with_no_answers_graded():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-h", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+            {"type": "free_text", "correct_answer": "X is Y", "concept_tag": "t2"},
+            {"type": "free_text", "correct_answer": "Z is W", "concept_tag": "t3"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "a", 1: "X is Y", 2: "no idea"})
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).order_by(AssignmentQuestion.order).all()
+        q1_id, q2_id = questions[1].id, questions[2].id
+
+    # Only q1 gets a grade back; q2's question_id is missing from the LLM response.
+    partial_grades = [AnswerGrade(question_id=q1_id, is_correct=True, feedback="Correct.")]
+    with patch("app.agents.evaluation.grade.grade_free_text_answers", return_value=partial_grades):
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    with SessionLocal() as db:
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt.status == "failed"
+        assert str(q2_id) in attempt.error
+        assert attempt.overall_score is None
+        # All-or-nothing: even the mcq answer graded before the check must be rolled back.
+        answers = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all()
+        assert all(a.is_correct is None for a in answers)
+        assert all(a.graded_at is None for a in answers)
+
+
 def test_idempotent_when_not_in_grading_status():
     with SessionLocal() as db:
         assignment_id = _make_assignment_with_questions(db, "grade-f", [

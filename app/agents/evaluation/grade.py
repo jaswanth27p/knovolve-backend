@@ -64,6 +64,9 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
 
         if free_text_items:
             grades_by_question = {g.question_id: g for g in grade_free_text_answers(free_text_items)}
+            missing = [i.question_id for i in free_text_items if i.question_id not in grades_by_question]
+            if missing:
+                raise ValueError(f"grader returned no grade for question_id(s): {missing}")
             for answer in answers:
                 grade = grades_by_question.get(answer.question_id)
                 if grade is not None:

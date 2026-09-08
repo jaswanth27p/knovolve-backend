@@ -230,7 +230,9 @@ def submit_assignment_attempt(slug: str, assignment_id: int, body: SubmitAttempt
     course = db.scalar(select(Course).where(Course.topic_slug == slug))
     if not course:
         raise HTTPException(status_code=404, detail="course not found")
-    assignment = db.get(Assignment, assignment_id)
+    assignment = db.scalar(
+        select(Assignment).where(Assignment.id == assignment_id, Assignment.scope == "global")
+    )
     if assignment is None or assignment.status != "ready" or not _assignment_belongs_to_course(db, assignment, course.id):
         raise HTTPException(status_code=404, detail="assignment not found")
 
@@ -290,7 +292,9 @@ def get_assignment_attempt(slug: str, assignment_id: int, attempt_id: int,
     course = db.scalar(select(Course).where(Course.topic_slug == slug))
     if not course:
         raise HTTPException(status_code=404, detail="course not found")
-    assignment = db.get(Assignment, assignment_id)
+    assignment = db.scalar(
+        select(Assignment).where(Assignment.id == assignment_id, Assignment.scope == "global")
+    )
     if assignment is None or not _assignment_belongs_to_course(db, assignment, course.id):
         raise HTTPException(status_code=404, detail="assignment not found")
     attempt = db.get(AssignmentAttempt, attempt_id)
