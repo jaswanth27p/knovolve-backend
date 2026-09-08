@@ -109,7 +109,15 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
         attempt.status = "graded"
         attempt.updated_at = datetime.now(timezone.utc)
         streaks.record_activity(db, attempt.user_id, attempt.updated_at)
-        remediation_concept_tags = grading.remediation_concept_tags
+        # Defense-in-depth, mirroring the grades[]/question_id guard above:
+        # only ever persist/dispatch remediation tags that were actually
+        # among this attempt's questions' concept_tag values. Without this,
+        # a paraphrased or invented tag from the LLM's free-form verdict
+        # would get written verbatim into ChapterContent.remediation_target_tags
+        # — the durable, permanent weakness record later specs match on by
+        # tag — and drive which sections get generated.
+        allowed_tags = {q.concept_tag for q in questions.values()}
+        remediation_concept_tags = [t for t in grading.remediation_concept_tags if t in allowed_tags]
         db.commit()
     except Exception as exc:
         # Rolls back any in-session, uncommitted grading (e.g. mcq/true_false

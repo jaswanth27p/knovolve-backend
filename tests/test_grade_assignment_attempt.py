@@ -304,6 +304,33 @@ def test_remediation_dispatched_for_chapter_level_attempt_with_remediation_tags(
     mock_remediate_task.delay.assert_called_once_with(chapter_id, user_id, ["t1"], attempt_id)
 
 
+def test_remediation_tags_filtered_to_attempts_actual_concept_tags():
+    """Defense-in-depth mirroring the grades[]/question_id guard: a
+    hallucinated/paraphrased concept tag from the LLM's free-form verdict
+    must never reach remediate_chapter_task.delay(...) — only tags that
+    were actually among the attempt's questions' concept_tag values."""
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-remediate-filter", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "wrong"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        user_id = attempt.user_id
+        chapter_id = _chapter_id_for_assignment(db, assignment_id)
+
+    fake_response = GradingResponse(
+        grades=[], remediation_concept_tags=["t1", "invented-hallucinated-tag"],
+        verdict_reasoning="Missed t1.",
+    )
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response), \
+         patch("app.agents.evaluation.grade.remediate_chapter_task") as mock_remediate_task:
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    mock_remediate_task.delay.assert_called_once_with(chapter_id, user_id, ["t1"], attempt_id)
+
+
 def test_remediation_not_dispatched_when_remediation_tags_empty():
     with SessionLocal() as db:
         assignment_id = _make_assignment_with_questions(db, "grade-remediate-b", [

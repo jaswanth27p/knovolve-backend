@@ -97,7 +97,13 @@ def remediate_chapter(
                 chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"],
             )
             section = ChapterContentSection(
-                chapter_content_id=content.id, order=i, heading=entry["heading"], kind=entry["kind"],
+                # kind is hardcoded, not passed through from entry["kind"]:
+                # remediation sections are always re-teaching content by
+                # definition, and generate_chapter_assignment only builds
+                # questions from kind=="teaching" sections — pinning this
+                # removes an LLM-controlled value from a place where the
+                # answer is actually invariant.
+                chapter_content_id=content.id, order=i, heading=entry["heading"], kind="teaching",
                 body_markdown=result.body_markdown,
                 examples=[e.model_dump() for e in result.examples],
                 diagram_spec=None, diagram_status=None,  # no diagram generation for remediation, V1
