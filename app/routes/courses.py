@@ -17,8 +17,10 @@ from app.models.course import Course, CourseJob, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.enrollment import UserCourse
 from app.models.assignment import Assignment, AssignmentQuestion
+from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.schemas.course import CreateCourseRequest, CourseJobResponse, PublicCourseResponse
 from app.schemas.assignment import AssignmentQuestionResponse, AssignmentResponse
+from app.schemas.attempt import SubmitAttemptRequest, AttemptSubmitResponse
 from app.agents.course_creation.nodes.normalize_topic import (
     _canonicalize,
     _slugify,
@@ -30,6 +32,7 @@ from app.agents.chapter_content.generate import stream_chapter_content
 from app.realtime.chapter_content_events import channel_name
 from app.tasks.course_creation_task import run_course_creation_job
 from app.tasks.assignment_tasks import generate_chapter_assignment_task, generate_module_assignment_task
+from app.tasks.evaluation_tasks import grade_assignment_attempt_task
 
 logger = logging.getLogger(__name__)
 
@@ -465,3 +468,53 @@ def get_module_assignment(slug: str, module_id: int, db: Session = Depends(get_s
     if assignment is None:
         return AssignmentResponse(status="generating")
     return _serialize_assignment(assignment, db)
+
+
+def _assignment_belongs_to_course(db: Session, assignment: Assignment, course_id: int) -> bool:
+    """True if `assignment` (chapter- or module-level) is part of `course_id`.
+    Used by both the submit and fetch attempt routes so an assignment id from
+    a different course can never be submitted/fetched against this slug."""
+    if assignment.level == "chapter":
+        content = db.get(ChapterContent, assignment.chapter_content_id)
+        if content is None:
+            return False
+        chapter = db.get(Chapter, content.chapter_id)
+        if chapter is None:
+            return False
+        module = db.get(Module, chapter.module_id)
+        return module is not None and module.course_id == course_id
+    module = db.get(Module, assignment.module_id)
+    return module is not None and module.course_id == course_id
+
+
+@router.post("/{slug}/assignments/{assignment_id}/attempts", response_model=AttemptSubmitResponse, status_code=202)
+def submit_assignment_attempt(slug: str, assignment_id: int, body: SubmitAttemptRequest,
+                               db: Session = Depends(get_session), user=Depends(get_current_user)):
+    course = db.scalar(select(Course).where(Course.topic_slug == slug))
+    if not course:
+        raise HTTPException(status_code=404, detail="course not found")
+    assignment = db.get(Assignment, assignment_id)
+    if assignment is None or assignment.status != "ready" or not _assignment_belongs_to_course(db, assignment, course.id):
+        raise HTTPException(status_code=404, detail="assignment not found")
+
+    questions = db.scalars(
+        select(AssignmentQuestion).where(AssignmentQuestion.assignment_id == assignment.id)
+    ).all()
+    questions_by_id = {q.id: q for q in questions}
+    submitted_ids = {a.question_id for a in body.answers}
+    if submitted_ids != set(questions_by_id.keys()):
+        raise HTTPException(status_code=400, detail="submitted answers must cover exactly the assignment's questions")
+
+    now = datetime.now(timezone.utc)
+    attempt = AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="grading",
+                                 created_at=now, updated_at=now)
+    db.add(attempt)
+    db.flush()
+    for a in body.answers:
+        question = questions_by_id[a.question_id]
+        db.add(AssignmentAnswer(attempt_id=attempt.id, question_id=question.id,
+                                 concept_tag=question.concept_tag, user_answer=a.answer))
+    db.commit()
+
+    grade_assignment_attempt_task.delay(attempt.id)  # pyright: ignore[reportFunctionMemberAccess]
+    return AttemptSubmitResponse(attempt_id=attempt.id, status="grading")
