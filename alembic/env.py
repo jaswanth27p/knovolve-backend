@@ -21,6 +21,7 @@ from app.models.course import (  # noqa: F401  (registers models with Base.metad
 from app.models.chapter_content import ChapterContent, ChapterContentSection  # noqa: F401  (registers models with Base.metadata for autogenerate)
 from app.models.assignment import Assignment, AssignmentQuestion  # noqa: F401  (registers models with Base.metadata for autogenerate)
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer  # noqa: F401  (registers models with Base.metadata for autogenerate)
+from app.models.learner_streak import LearnerStreak  # noqa: F401  (registers model with Base.metadata for autogenerate)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

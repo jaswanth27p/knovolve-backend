@@ -14,6 +14,7 @@ from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.enrollment import UserCourse
+from app.models.learner_streak import LearnerStreak
 
 __all__ = [
     "User",
@@ -31,4 +32,5 @@ __all__ = [
     "AssignmentAttempt",
     "AssignmentAnswer",
     "UserCourse",
+    "LearnerStreak",
 ]
