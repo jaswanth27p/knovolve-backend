@@ -243,3 +243,65 @@ def test_task_wrapper_invokes_grading():
 
     mock_grade.assert_called_once()
     assert mock_grade.call_args.args[0] == attempt_id
+
+
+from app.models.learner_streak import LearnerStreak
+
+
+def test_successful_grading_records_streak_activity():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-streak-a", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "a"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        user_id = attempt.user_id
+
+    with SessionLocal() as db:
+        grade_assignment_attempt(attempt_id, db)
+
+    with SessionLocal() as db:
+        streak = db.query(LearnerStreak).filter_by(user_id=user_id).one()
+        assert streak.current_streak == 1
+        assert streak.longest_streak == 1
+
+
+def test_failed_grading_does_not_record_streak_activity():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-streak-b", [
+            {"type": "free_text", "correct_answer": "X is Y", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "no idea"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        user_id = attempt.user_id
+
+    with patch("app.agents.evaluation.grade.grade_free_text_answers", side_effect=RuntimeError("llm down")):
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    with SessionLocal() as db:
+        streak = db.query(LearnerStreak).filter_by(user_id=user_id).one_or_none()
+        assert streak is None
+
+
+def test_idempotent_regrade_does_not_double_record_streak_activity():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-streak-c", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "a"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        user_id = attempt.user_id  # read before commit expires/detaches `attempt`
+        attempt.status = "graded"
+        attempt.overall_score = 1.0
+        db.commit()
+
+    with SessionLocal() as db:
+        grade_assignment_attempt(attempt_id, db)  # already graded — must no-op, including streak
+
+    with SessionLocal() as db:
+        streak = db.query(LearnerStreak).filter_by(user_id=user_id).one_or_none()
+        assert streak is None

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.assignment import AssignmentQuestion
 from app.agents.evaluation.nodes.grade_free_text_answers import FreeTextAnswerItem, grade_free_text_answers
+from app.services import streaks
 
 
 def _normalize(text: str) -> str:
@@ -78,6 +79,7 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
         attempt.overall_score = correct_count / len(answers) if answers else 0.0
         attempt.status = "graded"
         attempt.updated_at = datetime.now(timezone.utc)
+        streaks.record_activity(db, attempt.user_id, attempt.updated_at)
         db.commit()
     except Exception as exc:
         # Rolls back any in-session, uncommitted grading (e.g. mcq/true_false
