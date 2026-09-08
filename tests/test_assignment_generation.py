@@ -1,5 +1,5 @@
 # backend/tests/test_assignment_generation.py
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from app.db import SessionLocal
 from app.models.course import Course, Module, Chapter
@@ -229,3 +229,211 @@ def test_module_task_wrapper_invokes_generation():
 
     mock_generate.assert_called_once()
     assert mock_generate.call_args.args[0] == module_id
+
+
+# --- crash recovery: a "generating" row whose worker died -------------------
+
+from sqlalchemy.exc import IntegrityError
+from app.agents.assignment.generate import STALE_AFTER, _reactivate_if_retryable
+
+
+def _add_assignment(*, status: str, age: timedelta = timedelta(0), **target) -> int:
+    stamp = datetime.now(timezone.utc) - age
+    with SessionLocal() as db:
+        assignment = Assignment(scope="global", status=status, created_at=stamp, updated_at=stamp, **target)
+        db.add(assignment)
+        db.commit()
+        return assignment.id
+
+
+def test_stale_generating_chapter_assignment_is_retried():
+    """acks_late redelivers a job whose worker was killed mid-run; the row it
+    left behind must not block the redelivered run forever."""
+    content_id = _make_ready_chapter_content("asg-stale-a", section_count=1)
+    _add_assignment(status="generating", age=STALE_AFTER + timedelta(minutes=1),
+                    level="chapter", chapter_content_id=content_id)
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section",
+               return_value=[_draft("a"), _draft("b"), _draft("c")]):
+        with SessionLocal() as db:
+            generate_chapter_assignment(content_id, db)
+
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(chapter_content_id=content_id).one()
+        assert assignment.status == "ready"
+        assert db.query(AssignmentQuestion).filter_by(assignment_id=assignment.id).count() == 3
+
+
+def test_fresh_generating_chapter_assignment_is_left_alone():
+    content_id = _make_ready_chapter_content("asg-stale-b", section_count=1)
+    _add_assignment(status="generating", age=timedelta(minutes=1),
+                    level="chapter", chapter_content_id=content_id)
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section") as mock_gen:
+        with SessionLocal() as db:
+            generate_chapter_assignment(content_id, db)
+
+    mock_gen.assert_not_called()
+    with SessionLocal() as db:
+        assert db.query(Assignment).filter_by(chapter_content_id=content_id).one().status == "generating"
+
+
+def test_stale_generating_module_assignment_is_retried():
+    module_id, _ = _make_module_with_chapters("asg-stale-c", chapter_count=1)
+    _add_assignment(status="generating", age=STALE_AFTER + timedelta(minutes=1),
+                    level="module", module_id=module_id)
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section",
+               return_value=[_draft("a"), _draft("b"), _draft("c")]):
+        with SessionLocal() as db:
+            generate_module_assignment(module_id, db)
+
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(module_id=module_id).one()
+        assert assignment.status == "ready"
+        assert db.query(AssignmentQuestion).filter_by(assignment_id=assignment.id).count() == 3
+
+
+def test_fresh_generating_module_assignment_is_left_alone():
+    module_id, _ = _make_module_with_chapters("asg-stale-d", chapter_count=1)
+    _add_assignment(status="generating", age=timedelta(minutes=1), level="module", module_id=module_id)
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section") as mock_gen:
+        with SessionLocal() as db:
+            generate_module_assignment(module_id, db)
+
+    mock_gen.assert_not_called()
+    with SessionLocal() as db:
+        assert db.query(Assignment).filter_by(module_id=module_id).one().status == "generating"
+
+
+def test_only_one_of_two_concurrent_retries_claims_the_stale_row():
+    """Both racers observe the same stale ("generating", updated_at) pair; the
+    compare-and-swap must let exactly one through so only one run spends LLM
+    calls and only one writes questions."""
+    content_id = _make_ready_chapter_content("asg-stale-e", section_count=1)
+    assignment_id = _add_assignment(status="generating", age=STALE_AFTER + timedelta(minutes=1),
+                                    level="chapter", chapter_content_id=content_id)
+
+    with SessionLocal() as db_a, SessionLocal() as db_b:
+        # both read the row before either writes
+        row_a = db_a.get(Assignment, assignment_id)
+        row_b = db_b.get(Assignment, assignment_id)
+        assert _reactivate_if_retryable(db_a, row_a) is True
+        assert _reactivate_if_retryable(db_b, row_b) is False
+
+
+def test_only_one_of_two_concurrent_retries_claims_a_failed_row():
+    content_id = _make_ready_chapter_content("asg-stale-f", section_count=1)
+    assignment_id = _add_assignment(status="failed", level="chapter", chapter_content_id=content_id)
+
+    with SessionLocal() as db_a, SessionLocal() as db_b:
+        row_a = db_a.get(Assignment, assignment_id)
+        row_b = db_b.get(Assignment, assignment_id)
+        assert _reactivate_if_retryable(db_a, row_a) is True
+        assert _reactivate_if_retryable(db_b, row_b) is False
+
+
+def test_retry_clears_questions_left_behind_by_the_previous_run():
+    content_id = _make_ready_chapter_content("asg-stale-g", section_count=1)
+    assignment_id = _add_assignment(status="generating", age=STALE_AFTER + timedelta(minutes=1),
+                                    level="chapter", chapter_content_id=content_id)
+    with SessionLocal() as db:
+        for i in range(2):
+            db.add(AssignmentQuestion(assignment_id=assignment_id, order=i, type="mcq", text=f"orphan-{i}",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag=f"old-{i}", difficulty="easy"))
+        db.commit()
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section",
+               return_value=[_draft("a"), _draft("b"), _draft("c")]):
+        with SessionLocal() as db:
+            generate_chapter_assignment(content_id, db)
+
+    with SessionLocal() as db:
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).all()
+        assert len(questions) == 3
+        assert not any(q.text.startswith("orphan-") for q in questions)
+
+
+def test_persistence_failure_marks_assignment_failed_instead_of_raising():
+    """A duplicate-order IntegrityError while writing questions must land as
+    status="failed", not as an unhandled task crash."""
+    content_id = _make_ready_chapter_content("asg-stale-h", section_count=1)
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section",
+               return_value=[_draft("a"), _draft("b"), _draft("c")]), \
+         patch("app.agents.assignment.generate._persist_questions",
+               side_effect=IntegrityError("INSERT", {}, Exception("duplicate key"))):
+        with SessionLocal() as db:
+            generate_chapter_assignment(content_id, db)  # must not raise
+
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(chapter_content_id=content_id).one()
+        assert assignment.status == "failed"
+        assert "duplicate key" in assignment.error
+
+
+# --- concurrent get-or-create race (partial unique index) -------------------
+
+def _race_on_first_scalar(db, insert_winner):
+    """Return a db.scalar replacement that simulates another worker inserting
+    the row between our SELECT and our INSERT: the first lookup reports "no
+    row" *after* the winner has already committed one."""
+    real_scalar = db.scalar
+    calls: list[int] = []
+
+    def racing_scalar(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            insert_winner()
+            return None
+        return real_scalar(*args, **kwargs)
+
+    return racing_scalar
+
+
+def test_concurrent_chapter_generation_recovers_from_insert_race():
+    content_id = _make_ready_chapter_content("asg-race-a", section_count=1)
+    winner_stamp = datetime.now(timezone.utc)
+
+    def _insert_winner():
+        with SessionLocal() as other:
+            other.add(Assignment(level="chapter", chapter_content_id=content_id, scope="global",
+                                 status="generating", created_at=winner_stamp, updated_at=winner_stamp))
+            other.commit()
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section") as mock_gen:
+        with SessionLocal() as db:
+            with patch.object(db, "scalar", side_effect=_race_on_first_scalar(db, _insert_winner)):
+                generate_chapter_assignment(content_id, db)  # loser: must not raise
+
+    mock_gen.assert_not_called()  # loser backs off, does not double-spend on the LLM
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(chapter_content_id=content_id).one()  # exactly one row
+        assert assignment.created_at == winner_stamp  # the loser adopted the winner's row
+        assert assignment.status == "generating"
+        assert db.query(AssignmentQuestion).filter_by(assignment_id=assignment.id).count() == 0
+
+
+def test_concurrent_module_generation_recovers_from_insert_race():
+    module_id, _ = _make_module_with_chapters("asg-race-b", chapter_count=1)
+    winner_stamp = datetime.now(timezone.utc)
+
+    def _insert_winner():
+        with SessionLocal() as other:
+            other.add(Assignment(level="module", module_id=module_id, scope="global", status="generating",
+                                 created_at=winner_stamp, updated_at=winner_stamp))
+            other.commit()
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section") as mock_gen:
+        with SessionLocal() as db:
+            with patch.object(db, "scalar", side_effect=_race_on_first_scalar(db, _insert_winner)):
+                generate_module_assignment(module_id, db)  # loser: must not raise
+
+    mock_gen.assert_not_called()
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(module_id=module_id).one()
+        assert assignment.created_at == winner_stamp
+        assert assignment.status == "generating"
+        assert db.query(AssignmentQuestion).filter_by(assignment_id=assignment.id).count() == 0

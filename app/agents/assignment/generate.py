@@ -6,17 +6,29 @@ diagram rendering), so a crash just retries the whole thing; there is
 nothing slow enough mid-way to need per-step persistence.
 """
 
-from datetime import datetime, timezone
-from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterable, Sequence
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from app.config import settings
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.chapter_content import ChapterContent, ChapterContentSection
-from app.models.course import Chapter
+from app.models.course import Chapter, Module
 from app.agents.assignment.nodes.generate_section_questions import generate_questions_for_section
 from app.agents.assignment.nodes.generate_topup_questions import generate_topup_questions
 
 MIN_QUESTIONS = 3
+
+# How long a row may sit in "generating" before a retry is allowed to take it
+# over. It has to exceed the longest a *healthy* run can hold the row, or a
+# retry would start generating alongside one that is still working. Celery's
+# hard task_time_limit is exactly that bound (the run is killed at it), so the
+# limit plus a generous margin for clock skew between the worker that wrote
+# updated_at and the one reading it is safe. Deliberately NOT the broker's
+# visibility_timeout (6h): that bounds redelivery, not run length, and would
+# leave a learner polling a dead assignment for six hours.
+STALE_AFTER = timedelta(seconds=settings.celery_task_time_limit_seconds) + timedelta(minutes=30)
 
 
 def _get_or_create_assignment(
@@ -59,6 +71,92 @@ def _get_or_create_assignment(
     return assignment, True
 
 
+def _reactivate_if_retryable(db: Session, assignment: Assignment) -> bool:
+    """Decide whether this run may (re)generate an Assignment row that already
+    existed, and claim it if so. Returns True when the caller owns generation.
+
+    Retryable states are "failed" and a *stale* "generating" — the latter is a
+    run whose worker died mid-flight: `task_acks_late` gets the job redelivered,
+    but without this the redelivered run would see "generating" and no-op,
+    stranding the row (and the polling client) forever.
+
+    The claim is a compare-and-swap on the exact (status, updated_at) pair this
+    run observed, so of two concurrent retries only one proceeds. Matching on
+    updated_at as well as status is what makes the stale case safe: both racers
+    observe status="generating", so status alone would let both CAS through.
+    """
+    observed_status = assignment.status
+    observed_updated_at = assignment.updated_at
+
+    if observed_status == "generating":
+        updated_at = observed_updated_at
+        if updated_at.tzinfo is None:  # defensive: a naive column read
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        if updated_at > datetime.now(timezone.utc) - STALE_AFTER:
+            return False  # a healthy generation is still in flight
+    elif observed_status != "failed":
+        return False  # "ready" — nothing to do
+
+    rows = db.execute(
+        update(Assignment)
+        .where(
+            Assignment.id == assignment.id,
+            Assignment.status == observed_status,
+            Assignment.updated_at == observed_updated_at,
+        )
+        .values(status="generating", error=None, updated_at=datetime.now(timezone.utc))
+    ).rowcount
+    db.commit()
+    if rows == 0:
+        return False  # another retry won the reactivation race
+
+    # A prior failed/partial/crashed run may have left question rows behind. A
+    # retry regenerates the whole set, so clear them rather than interleaving
+    # fresh questions with stale ones (and colliding on the unique order index).
+    db.execute(delete(AssignmentQuestion).where(AssignmentQuestion.assignment_id == assignment.id))
+    db.commit()
+    db.refresh(assignment)
+    return True
+
+
+def _mark_failed(db: Session, assignment: Assignment, exc: Exception) -> None:
+    db.rollback()
+    assignment.status = "failed"
+    assignment.error = str(exc)
+    assignment.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+def _persist_questions(db: Session, assignment: Assignment, questions: Iterable[tuple[int | None, Any]]) -> None:
+    """Write the generated questions in order and flip the assignment to
+    "ready". `questions` is (source_section_id, question-like) pairs — either
+    a freshly generated QuestionDraft or an existing AssignmentQuestion being
+    reused by a module assignment."""
+    for order, (section_id, q) in enumerate(questions):
+        db.add(AssignmentQuestion(
+            assignment_id=assignment.id, order=order, type=q.type, text=q.text,
+            # Copy: a reused AssignmentQuestion's JSONB list would otherwise be
+            # the same mutable object on both rows.
+            options=list(q.options) if q.options else None,
+            correct_answer=q.correct_answer, explanation=q.explanation, concept_tag=q.concept_tag,
+            difficulty=q.difficulty, source_section_id=section_id,
+        ))
+    assignment.status = "ready"
+    assignment.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+def _teaching_sections(db: Session, chapter_content_id: int) -> Sequence[ChapterContentSection]:
+    return db.scalars(
+        select(ChapterContentSection)
+        .where(
+            ChapterContentSection.chapter_content_id == chapter_content_id,
+            ChapterContentSection.kind == "teaching",
+        )
+        .order_by(ChapterContentSection.order)
+    ).all()
+
+
 def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
     content = db.get(ChapterContent, chapter_content_id)
     if content is None:
@@ -69,20 +167,10 @@ def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
         db, level="chapter", scope=content.scope, chapter_content_id=chapter_content_id,
         user_id=content.user_id if content.scope == "user" else None,
     )
-    if not created:
-        if assignment.status != "failed":
-            return  # already ready or another generation is in flight
-        assignment.status = "generating"
-        assignment.error = None
-        assignment.updated_at = datetime.now(timezone.utc)
-        db.commit()
+    if not created and not _reactivate_if_retryable(db, assignment):
+        return  # already ready, a healthy run is in flight, or we lost the race
 
-    sections = (
-        db.query(ChapterContentSection)
-        .filter_by(chapter_content_id=chapter_content_id, kind="teaching")
-        .order_by(ChapterContentSection.order)
-        .all()
-    )
+    sections = _teaching_sections(db, chapter_content_id)
 
     try:
         drafts_by_section: list[tuple[int | None, list]] = []
@@ -101,31 +189,20 @@ def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
                 needed,
             )
             drafts_by_section.append((None, topup))
+
+        _persist_questions(
+            db, assignment,
+            [(section_id, q) for section_id, drafts in drafts_by_section for q in drafts],
+        )
     except Exception as exc:
-        assignment.status = "failed"
-        assignment.error = str(exc)
-        assignment.updated_at = datetime.now(timezone.utc)
-        db.commit()
+        # Covers persistence too, not just the LLM calls: a duplicate-order
+        # IntegrityError here must land as status="failed", not as an
+        # unhandled Celery task crash.
+        _mark_failed(db, assignment, exc)
         return
 
-    order = 0
-    for section_id, drafts in drafts_by_section:
-        for q in drafts:
-            db.add(AssignmentQuestion(
-                assignment_id=assignment.id, order=order, type=q.type, text=q.text, options=q.options,
-                correct_answer=q.correct_answer, explanation=q.explanation, concept_tag=q.concept_tag,
-                difficulty=q.difficulty, source_section_id=section_id,
-            ))
-            order += 1
-    assignment.status = "ready"
-    assignment.updated_at = datetime.now(timezone.utc)
-    db.commit()
 
-
-from app.models.course import Module
-
-
-def _spread_by_concept(questions: list[AssignmentQuestion], count: int) -> list[AssignmentQuestion]:
+def _spread_by_concept(questions: Sequence[AssignmentQuestion], count: int) -> list[AssignmentQuestion]:
     """Pick `count` questions favoring distinct concept_tags first, so a
     reused subset doesn't accidentally duplicate one concept and skip
     another the original assignment covered."""
@@ -149,18 +226,15 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
         raise ValueError(f"Module {module_id} not found")
 
     assignment, created = _get_or_create_assignment(db, level="module", scope="global", module_id=module_id)
-    if not created:
-        if assignment.status != "failed":
-            return
-        assignment.status = "generating"
-        assignment.error = None
-        assignment.updated_at = datetime.now(timezone.utc)
-        db.commit()
+    if not created and not _reactivate_if_retryable(db, assignment):
+        return  # already ready, a healthy run is in flight, or we lost the race
 
-    chapters = db.query(Chapter).filter_by(module_id=module_id).order_by(Chapter.order).all()
+    chapters = db.scalars(
+        select(Chapter).where(Chapter.module_id == module_id).order_by(Chapter.order)
+    ).all()
 
     try:
-        all_drafts: list[tuple[int | None, object]] = []
+        all_drafts: list[tuple[int | None, Any]] = []
         for chapter in chapters:
             content = db.scalar(
                 select(ChapterContent).where(
@@ -176,20 +250,14 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
                     Assignment.chapter_content_id == content.id, Assignment.status == "ready",
                 )
             )
-            sections = (
-                db.query(ChapterContentSection)
-                .filter_by(chapter_content_id=content.id, kind="teaching")
-                .order_by(ChapterContentSection.order)
-                .all()
-            )
+            sections = _teaching_sections(db, content.id)
 
             if chapter_assignment is not None:
-                existing_questions = (
-                    db.query(AssignmentQuestion)
-                    .filter_by(assignment_id=chapter_assignment.id)
+                existing_questions = db.scalars(
+                    select(AssignmentQuestion)
+                    .where(AssignmentQuestion.assignment_id == chapter_assignment.id)
                     .order_by(AssignmentQuestion.order)
-                    .all()
-                )
+                ).all()
                 reuse_count = max(1, -(-len(existing_questions) // 2))  # ceil(n/2), min 1
                 for q in _spread_by_concept(existing_questions, reuse_count):
                     all_drafts.append((q.source_section_id, q))
@@ -218,19 +286,8 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
             )
             for q in topup:
                 all_drafts.append((None, q))
-    except Exception as exc:
-        assignment.status = "failed"
-        assignment.error = str(exc)
-        assignment.updated_at = datetime.now(timezone.utc)
-        db.commit()
-        return
 
-    for order, (section_id, q) in enumerate(all_drafts):
-        db.add(AssignmentQuestion(
-            assignment_id=assignment.id, order=order, type=q.type, text=q.text, options=q.options,
-            correct_answer=q.correct_answer, explanation=q.explanation, concept_tag=q.concept_tag,
-            difficulty=q.difficulty, source_section_id=section_id,
-        ))
-    assignment.status = "ready"
-    assignment.updated_at = datetime.now(timezone.utc)
-    db.commit()
+        _persist_questions(db, assignment, all_drafts)
+    except Exception as exc:
+        _mark_failed(db, assignment, exc)
+        return
