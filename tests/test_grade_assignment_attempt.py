@@ -78,6 +78,7 @@ def test_grades_mcq_and_true_false_by_exact_match_no_llm_call():
     mock_grade_free_text.assert_not_called()
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         assert attempt.status == "graded"
         assert attempt.overall_score == 0.5
         answers = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).order_by(AssignmentAnswer.question_id).all()
@@ -123,6 +124,7 @@ def test_free_text_answers_batched_into_one_llm_call():
     assert len(mock_grade_free_text.call_args.args[0]) == 2  # both items in one batched call
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         assert attempt.overall_score == 0.5
         answers = {a.question_id: a for a in db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all()}
         assert answers[q0_id].is_correct is True
@@ -151,6 +153,7 @@ def test_mixed_mcq_and_free_text_in_one_attempt():
     assert sent_items[0].question_id == free_text_question_id
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         assert attempt.overall_score == 1.0
 
 
@@ -168,6 +171,7 @@ def test_failure_marks_attempt_failed_with_no_answers_graded():
 
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         assert attempt.status == "failed"
         assert attempt.error == "llm down"
         assert attempt.overall_score is None
@@ -197,7 +201,9 @@ def test_partial_llm_grades_marks_attempt_failed_with_no_answers_graded():
 
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         assert attempt.status == "failed"
+        assert attempt.error is not None
         assert str(q2_id) in attempt.error
         assert attempt.overall_score is None
         # All-or-nothing: even the mcq answer graded before the check must be rolled back.
@@ -213,6 +219,7 @@ def test_idempotent_when_not_in_grading_status():
         ])
         attempt_id = _make_attempt(db, assignment_id, {0: "a"})
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         attempt.status = "graded"
         attempt.overall_score = 1.0
         db.commit()

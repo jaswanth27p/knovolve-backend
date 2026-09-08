@@ -143,6 +143,7 @@ def test_submit_creates_attempt_and_dispatches_grading():
 
     with SessionLocal() as db:
         attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
         assert attempt.status == "grading"
         answers = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all()
         assert len(answers) == 2
@@ -187,8 +188,8 @@ def test_get_attempt_requires_auth():
 
 
 def test_get_attempt_returns_grading_status():
-    headers = _auth_headers("att-api-f@example.com")
-    slug, assignment_id, question_ids = _make_ready_assignment("att-api-f", question_count=1)
+    headers = _auth_headers("att-api-j@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-j", question_count=1)
     with patch("app.routes.courses.grade_assignment_attempt_task"):
         submit_resp = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
@@ -210,6 +211,7 @@ def test_get_attempt_returns_graded_result_with_concept_breakdown():
     def _fake_grade(attempt_id):
         with SessionLocal() as db:
             attempt = db.get(AssignmentAttempt, attempt_id)
+            assert attempt is not None
             answer = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).one()
             answer.is_correct = True
             answer.feedback = "Correct."
@@ -244,6 +246,7 @@ def test_get_attempt_failed_status_does_not_auto_retry():
     def _fake_fail(attempt_id):
         with SessionLocal() as db:
             attempt = db.get(AssignmentAttempt, attempt_id)
+            assert attempt is not None
             attempt.status = "failed"
             attempt.error = "llm down"
             db.commit()
