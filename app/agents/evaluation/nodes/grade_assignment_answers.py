@@ -69,4 +69,9 @@ def grade_assignment_answers(
         known_text=_known_text(known_answers),
     )
     result = call_with_retry(structured.invoke, messages)
-    return result if isinstance(result, GradingResponse) else GradingResponse.model_validate(result)
+    response = result if isinstance(result, GradingResponse) else GradingResponse.model_validate(result)
+    # Code-level filter: never return grades for known-answer question_ids, even if the LLM
+    # hallucinated them. The grades list must only contain entries for free-text items.
+    free_text_ids = {item.question_id for item in free_text_items}
+    response.grades = [g for g in response.grades if g.question_id in free_text_ids]
+    return response

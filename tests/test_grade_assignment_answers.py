@@ -78,8 +78,13 @@ def test_known_answers_included_as_context_not_regraded():
         KnownAnswerItem(question_id=2, question_text="Pick one", concept_tag="t2",
                          user_answer="a", is_correct=True),
     ]
+    # Mock returns a grade for both the free-text question (id 1) AND a hallucinated
+    # grade for the known-answer question (id 2) — the SUT must filter out the hallucination.
     fake_response = GradingResponse(
-        grades=[AnswerGrade(question_id=1, is_correct=True, feedback="Correct.")],
+        grades=[
+            AnswerGrade(question_id=1, is_correct=True, feedback="Correct."),
+            AnswerGrade(question_id=2, is_correct=True, feedback="Hallucinated grade for known answer."),
+        ],
         remediation_concept_tags=[], verdict_reasoning="All good.",
     )
     mock_model = MagicMock()
@@ -88,8 +93,10 @@ def test_known_answers_included_as_context_not_regraded():
     with patch("app.agents.evaluation.nodes.grade_assignment_answers.get_chat_model", return_value=mock_model):
         result = grade_assignment_answers(free_text_items, known_answers)
 
-    # No grade is produced for the known-answer question (id 2) — it was
-    # already graded deterministically before this call.
+    # The filter must strip out the hallucinated grade for question_id 2 (the known answer).
+    # Only the free-text question (id 1) should remain.
     assert [g.question_id for g in result.grades] == [1]
+    assert len(result.grades) == 1
+    assert result.grades[0].question_id == 1
     prompt_text = str(mock_model.with_structured_output.return_value.invoke.call_args)
-    assert "Pick one" in prompt_text  # still passed as context
+    assert "Pick one" in prompt_text  # known answer passed as context only
