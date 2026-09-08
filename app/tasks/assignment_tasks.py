@@ -7,3 +7,12 @@ from app.tasks.celery_app import celery_app
 def generate_chapter_assignment_task(chapter_content_id: int) -> None:
     with SessionLocal() as db:
         generate_chapter_assignment(chapter_content_id, db)
+
+
+from app.agents.assignment.generate import generate_module_assignment
+
+
+@celery_app.task
+def generate_module_assignment_task(module_id: int) -> None:
+    with SessionLocal() as db:
+        generate_module_assignment(module_id, db)

@@ -120,3 +120,117 @@ def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
     assignment.status = "ready"
     assignment.updated_at = datetime.now(timezone.utc)
     db.commit()
+
+
+from app.models.course import Module
+
+
+def _spread_by_concept(questions: list[AssignmentQuestion], count: int) -> list[AssignmentQuestion]:
+    """Pick `count` questions favoring distinct concept_tags first, so a
+    reused subset doesn't accidentally duplicate one concept and skip
+    another the original assignment covered."""
+    seen_tags: set[str] = set()
+    picked: list[AssignmentQuestion] = []
+    leftover: list[AssignmentQuestion] = []
+    for q in questions:
+        if q.concept_tag not in seen_tags:
+            seen_tags.add(q.concept_tag)
+            picked.append(q)
+        else:
+            leftover.append(q)
+        if len(picked) == count:
+            return picked
+    return (picked + leftover)[:count]
+
+
+def generate_module_assignment(module_id: int, db: Session) -> None:
+    module = db.get(Module, module_id)
+    if module is None:
+        raise ValueError(f"Module {module_id} not found")
+
+    assignment, created = _get_or_create_assignment(db, level="module", scope="global", module_id=module_id)
+    if not created:
+        if assignment.status != "failed":
+            return
+        assignment.status = "generating"
+        assignment.error = None
+        assignment.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+    chapters = db.query(Chapter).filter_by(module_id=module_id).order_by(Chapter.order).all()
+
+    try:
+        all_drafts: list[tuple[int | None, object]] = []
+        for chapter in chapters:
+            content = db.scalar(
+                select(ChapterContent).where(
+                    ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global",
+                )
+            )
+            if content is None or content.status != "ready":
+                raise ValueError(f"chapter {chapter.id} content is not ready")
+
+            chapter_assignment = db.scalar(
+                select(Assignment).where(
+                    Assignment.level == "chapter", Assignment.scope == "global",
+                    Assignment.chapter_content_id == content.id, Assignment.status == "ready",
+                )
+            )
+            sections = (
+                db.query(ChapterContentSection)
+                .filter_by(chapter_content_id=content.id, kind="teaching")
+                .order_by(ChapterContentSection.order)
+                .all()
+            )
+
+            if chapter_assignment is not None:
+                existing_questions = (
+                    db.query(AssignmentQuestion)
+                    .filter_by(assignment_id=chapter_assignment.id)
+                    .order_by(AssignmentQuestion.order)
+                    .all()
+                )
+                reuse_count = max(1, -(-len(existing_questions) // 2))  # ceil(n/2), min 1
+                for q in _spread_by_concept(existing_questions, reuse_count):
+                    all_drafts.append((q.source_section_id, q))
+
+                if sections:
+                    fresh = generate_questions_for_section(
+                        chapter.title, chapter.objective, sections[0].heading,
+                        sections[0].body_markdown, sections[0].examples,
+                    )
+                    if fresh:
+                        all_drafts.append((sections[0].id, fresh[0]))
+            else:
+                for section in sections:
+                    drafts = generate_questions_for_section(
+                        chapter.title, chapter.objective, section.heading, section.body_markdown, section.examples,
+                    )
+                    for q in drafts:
+                        all_drafts.append((section.id, q))
+
+        if len(all_drafts) < MIN_QUESTIONS:
+            needed = MIN_QUESTIONS - len(all_drafts)
+            topup = generate_topup_questions(
+                module.title, module.objective,
+                [{"heading": c.title, "body_markdown": c.objective} for c in chapters],
+                needed,
+            )
+            for q in topup:
+                all_drafts.append((None, q))
+    except Exception as exc:
+        assignment.status = "failed"
+        assignment.error = str(exc)
+        assignment.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return
+
+    for order, (section_id, q) in enumerate(all_drafts):
+        db.add(AssignmentQuestion(
+            assignment_id=assignment.id, order=order, type=q.type, text=q.text, options=q.options,
+            correct_answer=q.correct_answer, explanation=q.explanation, concept_tag=q.concept_tag,
+            difficulty=q.difficulty, source_section_id=section_id,
+        ))
+    assignment.status = "ready"
+    assignment.updated_at = datetime.now(timezone.utc)
+    db.commit()
