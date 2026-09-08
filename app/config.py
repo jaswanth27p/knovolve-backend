@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_access_ttl_minutes: int = 15
     jwt_refresh_ttl_days: int = 30
+    # How long a revoked/expired refresh_tokens row is kept before the
+    # cleanup task purges it. Kept briefly post-revoke for reuse-detection
+    # forensics rather than deleted immediately.
+    refresh_token_purge_after_days: int = 30
     opencode_api_key: str
     opencode_zen_api_key: str = ""
     openrouter_api_key: str

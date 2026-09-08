@@ -11,7 +11,7 @@ client = TestClient(app)
 
 def _register_and_login(email: str) -> str:
     resp = client.post("/auth/register", json={"email": email, "password": "pw123456"})
-    return resp.json()["access_token"]
+    return resp.cookies["access_token"]
 
 
 def _make_chapter(topic_slug: str) -> tuple[str, int]:

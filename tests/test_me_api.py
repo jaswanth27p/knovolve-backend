@@ -12,8 +12,8 @@ client = TestClient(app)
 
 def _register(email: str) -> dict:
     client.post("/auth/register", json={"email": email, "password": "pw123456"})
-    tokens = client.post("/auth/login", json={"email": email, "password": "pw123456"}).json()
-    return {"Authorization": f"Bearer {tokens['access_token']}"}
+    resp = client.post("/auth/login", json={"email": email, "password": "pw123456"})
+    return {"Authorization": f"Bearer {resp.cookies['access_token']}"}
 
 
 def _make_course(slug: str, with_chapter: bool = True, content_ready: bool = False,
@@ -165,5 +165,5 @@ def test_delete_me_course_404_when_not_tracked():
 
 def _auth_for(email: str) -> dict:
     client.post("/auth/register", json={"email": email, "password": "pw123456"})
-    tokens = client.post("/auth/login", json={"email": email, "password": "pw123456"}).json()
-    return {"Authorization": f"Bearer {tokens['access_token']}"}
+    resp = client.post("/auth/login", json={"email": email, "password": "pw123456"})
+    return {"Authorization": f"Bearer {resp.cookies['access_token']}"}

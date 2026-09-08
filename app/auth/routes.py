@@ -2,7 +2,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,7 +10,8 @@ from app.config import settings
 from app.db import get_session
 from app.models.user import User
 from app.models.refresh_token import RefreshToken
-from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, RefreshRequest
+from app.schemas.auth import RegisterRequest, LoginRequest, AuthResponse
+from app.auth.dependencies import require_csrf_header
 from app.auth.security import (
     hash_password,
     verify_password,
@@ -20,6 +21,9 @@ from app.auth.security import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+ACCESS_COOKIE = "access_token"
+REFRESH_COOKIE = "refresh_token"
 
 
 @lru_cache(maxsize=1)
@@ -32,7 +36,30 @@ def _dummy_password_hash() -> str:
     return hash_password("no-such-user-timing-equalization-placeholder")
 
 
-def _issue_tokens(db: Session, user: User, commit: bool = True) -> TokenResponse:
+def _set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+    # httpOnly + Secure + SameSite=Strict: JS (including anything an XSS
+    # payload runs) can never read either cookie, and the browser will not
+    # attach them to any cross-site request. refresh_token is additionally
+    # scoped to /auth so it never leaves the browser on ordinary API calls -
+    # only the two auth endpoints that need it ever see it.
+    response.set_cookie(
+        ACCESS_COOKIE, access_token,
+        max_age=settings.jwt_access_ttl_minutes * 60,
+        httponly=True, secure=True, samesite="strict", path="/",
+    )
+    response.set_cookie(
+        REFRESH_COOKIE, refresh_token,
+        max_age=settings.jwt_refresh_ttl_days * 24 * 60 * 60,
+        httponly=True, secure=True, samesite="strict", path="/auth",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(ACCESS_COOKIE, path="/")
+    response.delete_cookie(REFRESH_COOKIE, path="/auth")
+
+
+def _issue_tokens(db: Session, user: User, response: Response) -> None:
     raw_refresh = create_refresh_token()
     db.add(RefreshToken(
         user_id=user.id,
@@ -40,19 +67,12 @@ def _issue_tokens(db: Session, user: User, commit: bool = True) -> TokenResponse
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_ttl_days),
         created_at=datetime.now(timezone.utc),
     ))
-    if commit:
-        db.commit()
-    else:
-        # Caller (refresh()) is holding a row lock from an earlier statement
-        # in this same transaction and needs the new row's id before it
-        # commits. flush() assigns the id and makes the insert visible to
-        # later statements in this transaction without releasing the lock.
-        db.flush()
-    return TokenResponse(access_token=create_access_token(user.id), refresh_token=raw_refresh)
+    db.commit()
+    _set_auth_cookies(response, create_access_token(user.id), raw_refresh)
 
 
-@router.post("/register", response_model=TokenResponse, status_code=201)
-def register(body: RegisterRequest, db: Session = Depends(get_session)):
+@router.post("/register", response_model=AuthResponse, status_code=201)
+def register(body: RegisterRequest, response: Response, db: Session = Depends(get_session)):
     # Accepted tradeoff: a distinct 409 here is a user-enumeration oracle
     # (an attacker can learn which emails are registered). This is standard
     # practice for products where "that email is taken" is expected UX during
@@ -75,11 +95,12 @@ def register(body: RegisterRequest, db: Session = Depends(get_session)):
         db.rollback()
         raise HTTPException(status_code=409, detail="email already registered")
     db.refresh(user)
-    return _issue_tokens(db, user)
+    _issue_tokens(db, user, response)
+    return AuthResponse()
 
 
-@router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, db: Session = Depends(get_session)):
+@router.post("/login", response_model=AuthResponse)
+def login(body: LoginRequest, response: Response, db: Session = Depends(get_session)):
     user = db.scalar(select(User).where(User.email == body.email))
     # Always run a bcrypt verify, even when no user is found, so a "no such
     # user" 401 and a "wrong password" 401 take the same amount of time.
@@ -87,7 +108,8 @@ def login(body: LoginRequest, db: Session = Depends(get_session)):
     password_ok = verify_password(body.password, password_hash)
     if not user or not password_ok:
         raise HTTPException(status_code=401, detail="invalid credentials")
-    return _issue_tokens(db, user)
+    _issue_tokens(db, user, response)
+    return AuthResponse()
 
 
 def _revoke_active_chain(db: Session, user_id: int) -> None:
@@ -102,9 +124,12 @@ def _revoke_active_chain(db: Session, user_id: int) -> None:
     db.commit()
 
 
-@router.post("/refresh", response_model=TokenResponse)
-def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
-    token_hash = hash_token(body.refresh_token)
+@router.post("/refresh", response_model=AuthResponse, dependencies=[Depends(require_csrf_header)])
+def refresh(request: Request, response: Response, db: Session = Depends(get_session)):
+    raw_refresh = request.cookies.get(REFRESH_COOKIE)
+    if not raw_refresh:
+        raise HTTPException(status_code=401, detail="no refresh token")
+    token_hash = hash_token(raw_refresh)
     token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
     if not token:
         raise HTTPException(status_code=401, detail="invalid refresh token")
@@ -167,22 +192,32 @@ def refresh(body: RefreshRequest, db: Session = Depends(get_session)):
     # token.user_id is a foreign key to users.id and there is no user-deletion
     # path in this codebase, so the referenced user is guaranteed to exist.
     assert user is not None
-    new_tokens = _issue_tokens(db, user, commit=False)
-    new_token_row = db.scalar(select(RefreshToken).where(
-        RefreshToken.token_hash == hash_token(new_tokens.refresh_token)
-    ))
-    # _issue_tokens(commit=False) just inserted and flushed this exact row in
-    # this same transaction, so it is guaranteed to be found here.
-    assert new_token_row is not None
+    new_raw_refresh = create_refresh_token()
+    new_token_row = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_token(new_raw_refresh),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_ttl_days),
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(new_token_row)
+    # Caller is holding a row lock from the claim UPDATE above and needs the
+    # new row's id before it commits. flush() assigns the id and makes the
+    # insert visible to later statements in this transaction without
+    # releasing the lock.
+    db.flush()
     token.replaced_by_id = new_token_row.id
     db.commit()
-    return new_tokens
+    _set_auth_cookies(response, create_access_token(user.id), new_raw_refresh)
+    return AuthResponse()
 
 
-@router.post("/logout", status_code=204)
-def logout(body: RefreshRequest, db: Session = Depends(get_session)):
-    token_hash = hash_token(body.refresh_token)
-    token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
-    if token and token.revoked_at is None:
-        token.revoked_at = datetime.now(timezone.utc)
-        db.commit()
+@router.post("/logout", status_code=204, dependencies=[Depends(require_csrf_header)])
+def logout(request: Request, response: Response, db: Session = Depends(get_session)):
+    raw_refresh = request.cookies.get(REFRESH_COOKIE)
+    if raw_refresh:
+        token_hash = hash_token(raw_refresh)
+        token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+        if token and token.revoked_at is None:
+            token.revoked_at = datetime.now(timezone.utc)
+            db.commit()
+    _clear_auth_cookies(response)

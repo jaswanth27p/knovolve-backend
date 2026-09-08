@@ -12,8 +12,8 @@ client = TestClient(app)
 
 def _auth_headers(email: str) -> dict:
     client.post("/auth/register", json={"email": email, "password": "pw123456"})
-    tokens = client.post("/auth/login", json={"email": email, "password": "pw123456"}).json()
-    return {"Authorization": f"Bearer {tokens['access_token']}"}
+    resp = client.post("/auth/login", json={"email": email, "password": "pw123456"})
+    return {"Authorization": f"Bearer {resp.cookies['access_token']}"}
 
 
 def _make_course_with_ready_chapter(slug: str, with_content: bool = True) -> tuple[int, int, int | None]:

@@ -22,8 +22,10 @@ app = FastAPI(title="Knovolve")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    # No allow_credentials: auth is a bearer token in the Authorization header,
-    # not a cookie, so the browser never needs to send credentials cross-origin.
+    # Auth cookies require allow_credentials=True; the browser refuses to
+    # send/store credentialed cookies for a wildcard origin, which is why
+    # cors_origins must stay an explicit allowlist rather than "*".
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

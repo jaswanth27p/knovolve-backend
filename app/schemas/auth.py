@@ -11,11 +11,9 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
+class AuthResponse(BaseModel):
+    # Tokens travel only as httpOnly cookies (never in the JSON body) so
+    # client-side JS - including anything an XSS payload runs - can never
+    # read them. This field exists purely so API clients can tell the call
+    # succeeded.
     token_type: str = "bearer"
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str

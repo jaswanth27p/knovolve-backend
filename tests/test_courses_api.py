@@ -6,8 +6,8 @@ client = TestClient(app)
 
 def _auth_headers():
     client.post("/auth/register", json={"email": "course-user@example.com", "password": "pw123456"})
-    tokens = client.post("/auth/login", json={"email": "course-user@example.com", "password": "pw123456"}).json()
-    return {"Authorization": f"Bearer {tokens['access_token']}"}
+    resp = client.post("/auth/login", json={"email": "course-user@example.com", "password": "pw123456"})
+    return {"Authorization": f"Bearer {resp.cookies['access_token']}"}
 
 def test_post_courses_requires_auth():
     resp = client.post("/courses", json={"topic": "Rust"})

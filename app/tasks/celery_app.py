@@ -1,6 +1,7 @@
 import os
 
 from celery import Celery
+from celery.schedules import crontab
 
 from app.config import settings
 from app.observability import instrument_static, setup_logging, setup_tracing
@@ -20,7 +21,19 @@ celery_app.conf.include = [
     "app.tasks.assignment_tasks",
     "app.tasks.evaluation_tasks",
     "app.tasks.chapter_content_tasks",
+    "app.tasks.auth_tasks",
 ]
+
+# Periodic hygiene: revoked/expired refresh_tokens rows otherwise accumulate
+# forever (every rotation - i.e. every /auth/refresh call - adds one and
+# leaves its predecessor revoked). Runs once a day; the row is deleted only
+# after settings.refresh_token_purge_after_days.
+celery_app.conf.beat_schedule = {
+    "purge-expired-refresh-tokens": {
+        "task": "app.tasks.auth_tasks.purge_expired_refresh_tokens_task",
+        "schedule": crontab(hour=3, minute=0),
+    },
+}
 
 # Crash-resumability: ack the message only after the task body finishes, so a
 # worker killed mid-run does not lose the job (the broker redelivers it once
