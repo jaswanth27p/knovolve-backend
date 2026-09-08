@@ -421,3 +421,42 @@ GRADE_ASSIGNMENT_ANSWERS_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# generate_remediation_outline.generate_remediation_outline
+# ---------------------------------------------------------------------------
+# Variant of GENERATE_SECTION_OUTLINE_PROMPT for V2+ chapter versions: the
+# learner already covered the whole chapter once and is weak on specific
+# concepts within it — this must NOT re-teach the whole chapter, only the
+# 1-3 sections narrowly targeting the listed weak concepts.
+GENERATE_REMEDIATION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert instructional designer for Knovolve, an "
+            "adaptive learning platform. A learner already went through this "
+            "chapter once but is still weak on SPECIFIC concepts within it. "
+            "Design a SHORT, targeted re-teach: 1 to 3 content sections "
+            "covering ONLY the weak concepts listed below.\n\n"
+            "Requirements:\n"
+            "- Do NOT re-teach the whole chapter — the learner already "
+            "covered everything else. Focus exclusively on the listed weak "
+            "concepts.\n"
+            "- Tag every section \"teaching\" (no \"intro\" section — this is "
+            "a narrow remediation, not a fresh introduction to the chapter).\n"
+            "- Order sections so each builds on the previous one if there's "
+            "a dependency between the weak concepts; otherwise any order.\n"
+            "- Write each objective as a concrete, assessable statement of "
+            "what the learner can do after that section.\n"
+            "- Give each section a specific, content-bearing heading.\n"
+            "- Number sections starting at 1, matching their intended order.",
+        ),
+        (
+            "human",
+            "Chapter title: {chapter_title}\n"
+            "Chapter objective: {chapter_objective}\n"
+            "Weak concepts to re-teach: {weak_concept_tags}\n\n"
+            "Design 1-3 sections covering only these weak concepts.",
+        ),
+    ]
+)

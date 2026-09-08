@@ -4,6 +4,7 @@ LLM_NODES = {
     "generate_chapters": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "build_concept_graph": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "generate_section_outline": {"provider": "opencode-go", "model": "mimo-v2.5"},
+    "generate_remediation_outline": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "generate_chapter_section": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "generate_section_questions": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "generate_topup_questions": {"provider": "opencode-go", "model": "mimo-v2.5"},

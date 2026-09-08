@@ -19,6 +19,7 @@ celery_app.conf.include = [
     "app.tasks.render_diagram_task",
     "app.tasks.assignment_tasks",
     "app.tasks.evaluation_tasks",
+    "app.tasks.chapter_content_tasks",
 ]
 
 # Crash-resumability: ack the message only after the task body finishes, so a
