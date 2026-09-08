@@ -15,10 +15,10 @@ def test_post_courses_requires_auth():
 
 def test_post_courses_enqueues_job():
     headers = _auth_headers()
-    with patch("app.routes.courses._canonicalize", return_value="Elixir"), \
-         patch("app.routes.courses.find_existing", return_value=None), \
-         patch("app.routes.courses.embed", return_value=[0.0] * 2048), \
-         patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
+    with patch("app.services.courses._canonicalize", return_value="Elixir"), \
+         patch("app.services.courses.find_existing", return_value=None), \
+         patch("app.services.courses.embed", return_value=[0.0] * 2048), \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
     assert resp.status_code == 202
     assert resp.json()["status"] == "pending"
@@ -28,9 +28,9 @@ def test_post_courses_concurrent_same_topic_attaches_to_existing_job():
     headers = _auth_headers()
     from app.models.course import CourseJob
     fake_job = CourseJob(id=123, topic_slug="haskell", topic_raw="Haskell", status="pending")
-    with patch("app.routes.courses._canonicalize", return_value="Haskell"), \
-         patch("app.routes.courses.embed", return_value=[0.0] * 2048), \
-         patch("app.routes.courses.find_existing", return_value=fake_job):
+    with patch("app.services.courses._canonicalize", return_value="Haskell"), \
+         patch("app.services.courses.embed", return_value=[0.0] * 2048), \
+         patch("app.services.courses.find_existing", return_value=fake_job):
         resp = client.post("/courses", json={"topic": "haskell"}, headers=headers)
     assert resp.status_code == 202
     assert resp.json()["job_id"] == 123
@@ -43,10 +43,10 @@ def test_post_courses_dedups_on_canonical_embedding():
     from datetime import datetime, timezone
     from app.db import SessionLocal
     from app.models.course import CourseJob
-    with patch("app.routes.courses._canonicalize", return_value="Elixir") as mock_can, \
-         patch("app.routes.courses.embed", return_value=[0.5] * 2048) as mock_embed, \
-         patch("app.routes.courses.find_existing", return_value=None) as mock_find, \
-         patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
+    with patch("app.services.courses._canonicalize", return_value="Elixir") as mock_can, \
+         patch("app.services.courses.embed", return_value=[0.5] * 2048) as mock_embed, \
+         patch("app.services.courses.find_existing", return_value=None) as mock_find, \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "i want to learn elixir"}, headers=headers)
     assert resp.status_code == 202
     mock_can.assert_called_once_with("i want to learn elixir")
@@ -65,10 +65,10 @@ def test_post_courses_canonicalize_failure_falls_back_to_raw():
     from datetime import datetime, timezone
     from app.db import SessionLocal
     from app.models.course import CourseJob
-    with patch("app.routes.courses._canonicalize", side_effect=RuntimeError("llm down")), \
-         patch("app.routes.courses.embed", return_value=[0.5] * 2048), \
-         patch("app.routes.courses.find_existing", return_value=None), \
-         patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
+    with patch("app.services.courses._canonicalize", side_effect=RuntimeError("llm down")), \
+         patch("app.services.courses.embed", return_value=[0.5] * 2048), \
+         patch("app.services.courses.find_existing", return_value=None), \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
     assert resp.status_code == 202
     mock_delay.assert_called_once()
@@ -93,10 +93,10 @@ def test_post_courses_recovers_when_concurrent_job_claims_slug():
         db.refresh(job)
         job_id = job.id
 
-    with patch("app.routes.courses._canonicalize", return_value="Elixir"), \
-         patch("app.routes.courses.embed", return_value=[0.5] * 2048), \
-         patch("app.routes.courses.find_existing", return_value=None), \
-         patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
+    with patch("app.services.courses._canonicalize", return_value="Elixir"), \
+         patch("app.services.courses.embed", return_value=[0.5] * 2048), \
+         patch("app.services.courses.find_existing", return_value=None), \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "elixir study guide"}, headers=headers)
     assert resp.status_code == 202
     assert resp.json()["job_id"] == job_id
@@ -153,9 +153,9 @@ def test_post_courses_existing_course_returns_200_not_202():
         db.refresh(course)
         course_id = course.id
 
-    with patch("app.routes.courses._canonicalize", return_value="TypeScript"), \
-         patch("app.routes.courses.embed", return_value=[0.9] + [0.0] * 2047), \
-         patch("app.routes.courses.find_existing", return_value=course):
+    with patch("app.services.courses._canonicalize", return_value="TypeScript"), \
+         patch("app.services.courses.embed", return_value=[0.9] + [0.0] * 2047), \
+         patch("app.services.courses.find_existing", return_value=course):
         resp = client.post("/courses", json={"topic": "typescript"}, headers=headers)
     assert resp.status_code == 200
     body = resp.json()
@@ -178,8 +178,8 @@ def test_retry_failed_job_reenqueues():
         db.refresh(job)
         job_id = job.id
 
-    with patch("app.routes.courses.find_existing", return_value=None), \
-         patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
+    with patch("app.services.courses.find_existing", return_value=None), \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post(f"/courses/jobs/{job_id}/retry", headers=headers)
     assert resp.status_code == 202
     assert resp.json()["status"] == "pending"
@@ -235,8 +235,8 @@ def test_retry_attaches_course_created_elsewhere():
         db.refresh(job)
         job_id = job.id
 
-    with patch("app.routes.courses.find_existing", return_value=course), \
-         patch("app.routes.courses.run_course_creation_job.delay") as mock_delay:
+    with patch("app.services.courses.find_existing", return_value=course), \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post(f"/courses/jobs/{job_id}/retry", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["status"] == "exists"

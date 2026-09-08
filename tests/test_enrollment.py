@@ -35,10 +35,10 @@ def _make_course_with_chapter(topic_slug: str) -> tuple[int, int, int]:
 
 def test_generating_course_enrolls_user():
     headers = _auth_headers()
-    with patch("app.routes.courses._canonicalize", return_value="Elixir"), \
-         patch("app.routes.courses.embed", return_value=[0.0] * 2048), \
-         patch("app.routes.courses.find_existing", return_value=None), \
-         patch("app.routes.courses.run_course_creation_job.delay"):
+    with patch("app.services.courses._canonicalize", return_value="Elixir"), \
+         patch("app.services.courses.embed", return_value=[0.0] * 2048), \
+         patch("app.services.courses.find_existing", return_value=None), \
+         patch("app.services.courses.run_course_creation_job.delay"):
         resp = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
     assert resp.status_code == 202
     # enroll happens against the job's target; with no course yet, no row — but
@@ -78,10 +78,10 @@ def test_post_existing_course_enrolls_idempotently():
         course_id = course.id
 
     patches = [
-        patch("app.routes.courses._canonicalize", return_value="Elixir"),
-        patch("app.routes.courses.embed", return_value=[0.0] * 2048),
-        patch("app.routes.courses.find_existing", return_value=course),
-        patch("app.routes.courses.run_course_creation_job.delay"),
+        patch("app.services.courses._canonicalize", return_value="Elixir"),
+        patch("app.services.courses.embed", return_value=[0.0] * 2048),
+        patch("app.services.courses.find_existing", return_value=course),
+        patch("app.services.courses.run_course_creation_job.delay"),
     ]
     with ExitStack() as stack:
         for p in patches:
