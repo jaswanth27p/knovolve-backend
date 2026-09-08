@@ -334,21 +334,46 @@ def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_se
     return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
+def _chapter_assignment(db: Session, chapter_content_id: int) -> Assignment | None:
+    """The global chapter assignment for this content, if any. Filtered on
+    level+scope the same way `_get_or_create_assignment` filters: the schema
+    allows a per-user row on the same chapter_content_id, and an unfiltered
+    single-row fetch would then be free to hand one learner another's
+    assignment. Scope stays hardcoded to "global" — V1 only generates those."""
+    return db.scalar(
+        select(Assignment).where(
+            Assignment.level == "chapter",
+            Assignment.scope == "global",
+            Assignment.chapter_content_id == chapter_content_id,
+        )
+    )
+
+
+def _module_assignment(db: Session, module_id: int) -> Assignment | None:
+    """The global module assignment for this module, if any. See
+    `_chapter_assignment` for why level/scope are filtered."""
+    return db.scalar(
+        select(Assignment).where(
+            Assignment.level == "module",
+            Assignment.scope == "global",
+            Assignment.module_id == module_id,
+        )
+    )
+
+
 def _serialize_assignment(assignment: Assignment, db: Session) -> AssignmentResponse:
     if assignment.status != "ready":
         return AssignmentResponse(status=assignment.status, error=assignment.error)
-    questions = (
-        db.query(AssignmentQuestion)
-        .filter_by(assignment_id=assignment.id)
+    questions = db.scalars(
+        select(AssignmentQuestion)
+        .where(AssignmentQuestion.assignment_id == assignment.id)
         .order_by(AssignmentQuestion.order)
-        .all()
-    )
+    ).all()
     return AssignmentResponse(
         status="ready",
         questions=[
             AssignmentQuestionResponse(
                 id=q.id, order=q.order, type=q.type, text=q.text, options=q.options,
-                correct_answer=q.correct_answer, explanation=q.explanation,
                 concept_tag=q.concept_tag, difficulty=q.difficulty,
             )
             for q in questions
@@ -377,10 +402,10 @@ def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get
     if content is None or content.status != "ready":
         raise HTTPException(status_code=404, detail="chapter content not ready")
 
-    assignment = db.scalar(select(Assignment).where(Assignment.chapter_content_id == content.id))
+    assignment = _chapter_assignment(db, content.id)
     if assignment is None or assignment.status == "failed":
         generate_chapter_assignment_task.delay(content.id)  # pyright: ignore[reportFunctionMemberAccess]
-        assignment = db.scalar(select(Assignment).where(Assignment.chapter_content_id == content.id))
+        assignment = _chapter_assignment(db, content.id)
     if assignment is None:
         return AssignmentResponse(status="generating")
     return _serialize_assignment(assignment, db)
@@ -411,10 +436,10 @@ def create_module_assignment(slug: str, module_id: int, response: Response,
     if not _module_chapters_ready(module, db):
         raise HTTPException(status_code=409, detail="not all chapters in this module have ready content")
 
-    assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+    assignment = _module_assignment(db, module.id)
     if assignment is None or assignment.status == "failed":
         generate_module_assignment_task.delay(module.id)  # pyright: ignore[reportFunctionMemberAccess]
-        assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+        assignment = _module_assignment(db, module.id)
     if assignment is None:
         return AssignmentResponse(status="generating")
     response.status_code = 200 if assignment.status == "ready" else 202
@@ -431,12 +456,12 @@ def get_module_assignment(slug: str, module_id: int, db: Session = Depends(get_s
     if not module:
         raise HTTPException(status_code=404, detail="module not found")
 
-    assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+    assignment = _module_assignment(db, module.id)
     if assignment is None or assignment.status == "failed":
         if not _module_chapters_ready(module, db):
             raise HTTPException(status_code=409, detail="not all chapters in this module have ready content")
         generate_module_assignment_task.delay(module.id)  # pyright: ignore[reportFunctionMemberAccess]
-        assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+        assignment = _module_assignment(db, module.id)
     if assignment is None:
         return AssignmentResponse(status="generating")
     return _serialize_assignment(assignment, db)

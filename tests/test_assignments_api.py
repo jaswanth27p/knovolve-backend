@@ -77,6 +77,11 @@ def test_get_assignment_dispatches_when_missing_then_returns_ready():
     body = resp.json()
     assert body["status"] == "ready"
     assert len(body["questions"]) == 1
+    question = body["questions"][0]
+    assert question == {"id": question["id"], "order": 0, "type": "mcq", "text": "q",
+                        "options": ["a", "b"], "concept_tag": "t", "difficulty": "easy"}
+    # the answer key never goes over the wire to the learner
+    assert "correct_answer" not in question and "explanation" not in question
     mock_task.delay.assert_called_once_with(content_id)
 
 
@@ -156,7 +161,12 @@ def test_post_module_assignment_dispatches_and_returns_ready():
         resp = client.post(f"/courses/asg-api-mod-b/modules/{module_id}/assignment", headers=headers)
 
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ready"
+    body = resp.json()
+    assert body["status"] == "ready"
+    question = body["questions"][0]
+    assert question == {"id": question["id"], "order": 0, "type": "true_false", "text": "q",
+                        "options": None, "concept_tag": "t", "difficulty": "medium"}
+    assert "correct_answer" not in question and "explanation" not in question
     mock_task.delay.assert_called_once_with(module_id)
 
 
