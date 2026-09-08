@@ -134,3 +134,14 @@ def test_submit_allows_a_second_attempt_on_the_same_assignment():
     assert resp1.status_code == 202
     assert resp2.status_code == 202
     assert resp1.json()["attempt_id"] != resp2.json()["attempt_id"]
+
+
+def test_submit_400_when_duplicate_question_id():
+    headers = _auth_headers("att-api-f@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-f", question_count=1)
+    resp = client.post(
+        f"/courses/{slug}/assignments/{assignment_id}/attempts",
+        json={"answers": [{"question_id": question_ids[0], "answer": "a"}, {"question_id": question_ids[0], "answer": "b"}]},
+        headers=headers,
+    )
+    assert resp.status_code == 400

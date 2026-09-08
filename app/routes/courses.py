@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_session
-from app.enroll import touch_enrollment
+from app.services.enrollment import touch_enrollment
 from app.auth.dependencies import get_current_user
 from app.models.course import Course, CourseJob, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
@@ -502,6 +502,8 @@ def submit_assignment_attempt(slug: str, assignment_id: int, body: SubmitAttempt
     ).all()
     questions_by_id = {q.id: q for q in questions}
     submitted_ids = {a.question_id for a in body.answers}
+    if len(body.answers) != len(submitted_ids):
+        raise HTTPException(status_code=400, detail="duplicate question_id in submitted answers")
     if submitted_ids != set(questions_by_id.keys()):
         raise HTTPException(status_code=400, detail="submitted answers must cover exactly the assignment's questions")
 
