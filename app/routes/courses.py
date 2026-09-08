@@ -1,21 +1,15 @@
 import json
-from datetime import datetime, timezone
 from typing import Iterator
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db import get_session
-from app.services import assignments, chapter_content, courses
+from app.services import assignments, attempts, chapter_content, courses
 from app.services.enrollment import touch_enrollment
 from app.auth.dependencies import get_current_user
-from app.models.course import Course
-from app.models.assignment import Assignment, AssignmentQuestion
-from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.schemas.course import CreateCourseRequest, CourseJobResponse, PublicCourseResponse
 from app.schemas.assignment import AssignmentResponse
-from app.schemas.attempt import SubmitAttemptRequest, AttemptSubmitResponse, AnswerResult, ConceptScore, AttemptResponse
-from app.tasks.evaluation_tasks import grade_assignment_attempt_task
+from app.schemas.attempt import SubmitAttemptRequest, AttemptSubmitResponse, AttemptResponse
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -102,77 +96,12 @@ def get_module_assignment(slug: str, module_id: int, db: Session = Depends(get_s
 @router.post("/{slug}/assignments/{assignment_id}/attempts", response_model=AttemptSubmitResponse, status_code=202)
 def submit_assignment_attempt(slug: str, assignment_id: int, body: SubmitAttemptRequest,
                                db: Session = Depends(get_session), user=Depends(get_current_user)):
-    course = db.scalar(select(Course).where(Course.topic_slug == slug))
-    if not course:
-        raise HTTPException(status_code=404, detail="course not found")
-    assignment = db.scalar(
-        select(Assignment).where(Assignment.id == assignment_id, Assignment.scope == "global")
-    )
-    if assignment is None or assignment.status != "ready" or not assignments.assignment_belongs_to_course(db, assignment, course.id):
-        raise HTTPException(status_code=404, detail="assignment not found")
-
-    questions = db.scalars(
-        select(AssignmentQuestion).where(AssignmentQuestion.assignment_id == assignment.id)
-    ).all()
-    questions_by_id = {q.id: q for q in questions}
-    submitted_ids = {a.question_id for a in body.answers}
-    if len(body.answers) != len(submitted_ids):
-        raise HTTPException(status_code=400, detail="duplicate question_id in submitted answers")
-    if submitted_ids != set(questions_by_id.keys()):
-        raise HTTPException(status_code=400, detail="submitted answers must cover exactly the assignment's questions")
-
-    now = datetime.now(timezone.utc)
-    attempt = AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="grading",
-                                 created_at=now, updated_at=now)
-    db.add(attempt)
-    db.flush()
-    for a in body.answers:
-        question = questions_by_id[a.question_id]
-        db.add(AssignmentAnswer(attempt_id=attempt.id, question_id=question.id,
-                                 concept_tag=question.concept_tag, user_answer=a.answer))
-    db.commit()
-
-    grade_assignment_attempt_task.delay(attempt.id)  # pyright: ignore[reportFunctionMemberAccess]
-    return AttemptSubmitResponse(attempt_id=attempt.id, status="grading")
-
-
-def _serialize_attempt(attempt: AssignmentAttempt, db: Session) -> AttemptResponse:
-    if attempt.status != "graded":
-        return AttemptResponse(status=attempt.status, error=attempt.error)
-    answers = db.scalars(
-        select(AssignmentAnswer).where(AssignmentAnswer.attempt_id == attempt.id)
-    ).all()
-    concept_totals: dict[str, list[int]] = {}
-    for a in answers:
-        totals = concept_totals.setdefault(a.concept_tag, [0, 0])
-        totals[1] += 1
-        if a.is_correct:
-            totals[0] += 1
-    return AttemptResponse(
-        status="graded",
-        overall_score=attempt.overall_score,
-        answers=[
-            AnswerResult(question_id=a.question_id, is_correct=bool(a.is_correct), feedback=a.feedback or "")
-            for a in answers
-        ],
-        concept_scores=[
-            ConceptScore(concept_tag=tag, correct=c, total=t) for tag, (c, t) in concept_totals.items()
-        ],
-    )
+    course = courses.get_course_by_slug(db, slug)
+    return attempts.submit_attempt(db, user.id, course, assignment_id, body)
 
 
 @router.get("/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", response_model=AttemptResponse)
 def get_assignment_attempt(slug: str, assignment_id: int, attempt_id: int,
                             db: Session = Depends(get_session), user=Depends(get_current_user)):
-    course = db.scalar(select(Course).where(Course.topic_slug == slug))
-    if not course:
-        raise HTTPException(status_code=404, detail="course not found")
-    assignment = db.scalar(
-        select(Assignment).where(Assignment.id == assignment_id, Assignment.scope == "global")
-    )
-    if assignment is None or not assignments.assignment_belongs_to_course(db, assignment, course.id):
-        raise HTTPException(status_code=404, detail="assignment not found")
-    attempt = db.get(AssignmentAttempt, attempt_id)
-    if attempt is None or attempt.assignment_id != assignment.id or attempt.user_id != user.id:
-        raise HTTPException(status_code=404, detail="attempt not found")
-    return _serialize_attempt(attempt, db)
+    course = courses.get_course_by_slug(db, slug)
+    return attempts.get_attempt(db, user.id, course, assignment_id, attempt_id)

@@ -128,7 +128,7 @@ def test_submit_creates_attempt_and_dispatches_grading():
     headers = _auth_headers("att-api-d@example.com")
     slug, assignment_id, question_ids = _make_ready_assignment("att-api-d", question_count=2)
 
-    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task:
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task:
         resp = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
             json={"answers": [{"question_id": qid, "answer": "a"} for qid in question_ids]},
@@ -154,7 +154,7 @@ def test_submit_allows_a_second_attempt_on_the_same_assignment():
     headers = _auth_headers("att-api-e@example.com")
     slug, assignment_id, question_ids = _make_ready_assignment("att-api-e", question_count=1)
 
-    with patch("app.routes.courses.grade_assignment_attempt_task"):
+    with patch("app.services.attempts.grade_assignment_attempt_task"):
         resp1 = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
             json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
@@ -190,7 +190,7 @@ def test_get_attempt_requires_auth():
 def test_get_attempt_returns_grading_status():
     headers = _auth_headers("att-api-j@example.com")
     slug, assignment_id, question_ids = _make_ready_assignment("att-api-j", question_count=1)
-    with patch("app.routes.courses.grade_assignment_attempt_task"):
+    with patch("app.services.attempts.grade_assignment_attempt_task"):
         submit_resp = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
             json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
@@ -220,7 +220,7 @@ def test_get_attempt_returns_graded_result_with_concept_breakdown():
             attempt.overall_score = 1.0
             db.commit()
 
-    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task:
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task:
         mock_task.delay.side_effect = _fake_grade
         submit_resp = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
@@ -251,7 +251,7 @@ def test_get_attempt_failed_status_does_not_auto_retry():
             attempt.error = "llm down"
             db.commit()
 
-    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task:
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task:
         mock_task.delay.side_effect = _fake_fail
         submit_resp = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
@@ -260,7 +260,7 @@ def test_get_attempt_failed_status_does_not_auto_retry():
         )
     attempt_id = submit_resp.json()["attempt_id"]
 
-    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task_on_get:
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task_on_get:
         resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=headers)
 
     assert resp.status_code == 200
@@ -272,7 +272,7 @@ def test_get_attempt_failed_status_does_not_auto_retry():
 def test_get_attempt_404_for_another_users_attempt():
     slug, assignment_id, question_ids = _make_ready_assignment("att-api-i", question_count=1)
     owner_headers = _auth_headers("att-api-i-owner@example.com")
-    with patch("app.routes.courses.grade_assignment_attempt_task"):
+    with patch("app.services.attempts.grade_assignment_attempt_task"):
         submit_resp = client.post(
             f"/courses/{slug}/assignments/{assignment_id}/attempts",
             json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
