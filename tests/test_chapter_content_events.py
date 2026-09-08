@@ -11,7 +11,7 @@ def test_channel_name_is_stable_and_scoped_to_content_id():
 
 def test_publish_event_sends_json_on_the_right_channel():
     mock_client = MagicMock()
-    with patch("app.realtime.chapter_content_events.redis.Redis.from_url", return_value=mock_client):
+    with patch("app.realtime.chapter_content_events._get_client", return_value=mock_client):
         publish_event(42, {"type": "diagram_ready", "order": 0, "diagram_image_url": "http://x/y.svg"})
 
     args, _ = mock_client.publish.call_args
