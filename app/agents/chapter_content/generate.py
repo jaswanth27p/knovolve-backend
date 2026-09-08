@@ -18,6 +18,7 @@ from app.agents.chapter_content.nodes.generate_section_outline import generate_s
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
+from app.tasks.assignment_tasks import generate_chapter_assignment_task
 from app.tasks.render_diagram_task import render_diagram_task
 
 
@@ -165,4 +166,5 @@ def stream_chapter_content(chapter: Chapter, db: Session) -> Iterator[dict]:
         content.status = "ready"
         content.updated_at = datetime.now(timezone.utc)
         db.commit()
+        generate_chapter_assignment_task.delay(content.id)  # pyright: ignore[reportFunctionMemberAccess]
     yield {"type": "done"}

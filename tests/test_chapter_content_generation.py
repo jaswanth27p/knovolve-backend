@@ -42,7 +42,8 @@ def test_generates_all_sections_and_dispatches_diagram_task():
     with SessionLocal() as db, \
          patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline), \
          patch("app.agents.chapter_content.generate.generate_chapter_section", side_effect=section_responses), \
-         patch("app.agents.chapter_content.generate.render_diagram_task") as mock_task:
+         patch("app.agents.chapter_content.generate.render_diagram_task") as mock_diagram_task, \
+         patch("app.agents.chapter_content.generate.generate_chapter_assignment_task") as mock_assignment_task:
         events = list(stream_chapter_content(chapter, db))
 
     section_events = [e for e in events if e["type"] == "section_ready"]
@@ -52,7 +53,8 @@ def test_generates_all_sections_and_dispatches_diagram_task():
     assert section_events[1]["order"] == 1
     assert section_events[1]["diagram_status"] == "pending"
     assert events[-1]["type"] == "done"
-    mock_task.delay.assert_called_once()
+    mock_diagram_task.delay.assert_called_once()
+    mock_assignment_task.delay.assert_called_once()
 
 
 def test_ready_content_replays_without_any_llm_calls():
@@ -104,11 +106,13 @@ def test_resumes_reuses_persisted_outline_and_skips_done_sections():
     )
     with SessionLocal() as db, \
          patch("app.agents.chapter_content.generate.generate_section_outline") as mock_outline, \
-         patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=second_section) as mock_section:
+         patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=second_section) as mock_section, \
+         patch("app.agents.chapter_content.generate.generate_chapter_assignment_task") as mock_assignment_task:
         events = list(stream_chapter_content(chapter, db))
 
     mock_outline.assert_not_called()  # outline was already persisted, must not be regenerated
     mock_section.assert_called_once()  # only the missing section (H2) is generated
+    mock_assignment_task.delay.assert_called_once()
     section_events = [e for e in events if e["type"] == "section_ready"]
     assert section_events[0]["body_markdown"] == "already done"
     assert section_events[1]["body_markdown"] == "second body"
@@ -129,3 +133,24 @@ def test_generation_failure_marks_content_failed_and_yields_error():
         content = db.query(ChapterContent).filter_by(chapter_id=chapter.id).one()
         assert content.status == "failed"
         assert content.error == "llm down"
+
+
+def test_replaying_already_ready_content_does_not_redispatch_assignment():
+    chapter = _make_chapter("stream-cc-replay-no-redispatch")
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        content = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
+                                  outline=[{"heading": "H", "objective": "o", "kind": "teaching"}],
+                                  created_at=now, updated_at=now)
+        db.add(content)
+        db.commit()
+        db.add(ChapterContentSection(chapter_content_id=content.id, order=0, heading="H", kind="teaching",
+                                      body_markdown="cached body",
+                                      examples=[{"prompt": "p", "walkthrough": "w"}]))
+        db.commit()
+
+    with SessionLocal() as db, \
+         patch("app.agents.chapter_content.generate.generate_chapter_assignment_task") as mock_assignment_task:
+        list(stream_chapter_content(chapter, db))
+
+    mock_assignment_task.delay.assert_not_called()
