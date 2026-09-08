@@ -6,6 +6,7 @@ from app.models.chapter_content import ChapterContent
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.user import User
+from app.models.learner_streak import LearnerStreak
 from app.agents.evaluation.nodes.grade_free_text_answers import AnswerGrade
 from app.agents.evaluation.grade import grade_assignment_attempt
 from app.tasks.evaluation_tasks import grade_assignment_attempt_task
@@ -245,9 +246,6 @@ def test_task_wrapper_invokes_grading():
     assert mock_grade.call_args.args[0] == attempt_id
 
 
-from app.models.learner_streak import LearnerStreak
-
-
 def test_successful_grading_records_streak_activity():
     with SessionLocal() as db:
         assignment_id = _make_assignment_with_questions(db, "grade-streak-a", [
@@ -284,6 +282,56 @@ def test_failed_grading_does_not_record_streak_activity():
     with SessionLocal() as db:
         streak = db.query(LearnerStreak).filter_by(user_id=user_id).one_or_none()
         assert streak is None
+
+
+def test_second_grading_same_day_same_user_updates_existing_streak_row():
+    """Regression test for the streak create-branch race (Finding 1): grading
+    two attempts for the SAME user on the SAME UTC day must go through
+    record_activity's update branch (day_gap == 0) the second time, not
+    attempt a second insert. Also exercises that update branch through the
+    real grading trigger path, which no other test in this file does — every
+    other streak test here only ever produces a first ("create") row."""
+    with SessionLocal() as db:
+        user = User(email="grade-streak-same-day@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        user_id = user.id
+
+        assignment_id = _make_assignment_with_questions(db, "grade-streak-d", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).order_by(AssignmentQuestion.order).all()
+
+        attempt1 = AssignmentAttempt(assignment_id=assignment_id, user_id=user_id, status="grading",
+                                      created_at=_now(), updated_at=_now())
+        db.add(attempt1)
+        db.flush()
+        db.add(AssignmentAnswer(attempt_id=attempt1.id, question_id=questions[0].id,
+                                 concept_tag=questions[0].concept_tag, user_answer="a"))
+
+        attempt2 = AssignmentAttempt(assignment_id=assignment_id, user_id=user_id, status="grading",
+                                      created_at=_now(), updated_at=_now())
+        db.add(attempt2)
+        db.flush()
+        db.add(AssignmentAnswer(attempt_id=attempt2.id, question_id=questions[0].id,
+                                 concept_tag=questions[0].concept_tag, user_answer="a"))
+        db.commit()
+        attempt1_id, attempt2_id = attempt1.id, attempt2.id
+
+    with SessionLocal() as db:
+        grade_assignment_attempt(attempt1_id, db)
+
+    with SessionLocal() as db:
+        grade_assignment_attempt(attempt2_id, db)
+
+    with SessionLocal() as db:
+        attempt1_after = db.get(AssignmentAttempt, attempt1_id)
+        attempt2_after = db.get(AssignmentAttempt, attempt2_id)
+        assert attempt1_after is not None and attempt1_after.status == "graded"
+        assert attempt2_after is not None and attempt2_after.status == "graded"
+        streak = db.query(LearnerStreak).filter_by(user_id=user_id).one()
+        assert streak.current_streak == 1  # same UTC day both times — no streak change
+        assert streak.longest_streak == 1
 
 
 def test_idempotent_regrade_does_not_double_record_streak_activity():

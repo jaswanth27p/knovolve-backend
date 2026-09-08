@@ -5,17 +5,36 @@ the caller commits this together with its own row change so the streak
 update is atomic with whatever triggered it."""
 from datetime import datetime, timezone
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from app.models.learner_streak import LearnerStreak
 
 
 def record_activity(db: Session, user_id: int, at: datetime) -> None:
+    if at.tzinfo is None:
+        raise ValueError("record_activity requires a timezone-aware datetime")
+
     streak = db.scalars(
-        select(LearnerStreak).where(LearnerStreak.user_id == user_id)
+        select(LearnerStreak).where(LearnerStreak.user_id == user_id).with_for_update()
     ).one_or_none()
 
     if streak is None:
-        db.add(LearnerStreak(user_id=user_id, current_streak=1, longest_streak=1, last_active_at=at))
+        # Upsert instead of a plain insert: two concurrent grading transactions
+        # for the same user with no existing streak row can both SELECT nothing
+        # and both attempt to create the row, since the SELECT above takes no
+        # lock on a row that doesn't exist yet. Without on_conflict_do_nothing,
+        # the loser's INSERT raises IntegrityError on the unique `user_id`
+        # index, which (via grade.py's try/except) discards an otherwise
+        # successful grading result. Whichever transaction wins the race, both
+        # are recording activity at effectively the same instant, so
+        # (current_streak=1, longest_streak=1, last_active_at=at) is the
+        # correct end state either way — conceding the insert costs the loser
+        # nothing.
+        db.execute(
+            pg_insert(LearnerStreak)
+            .values(user_id=user_id, current_streak=1, longest_streak=1, last_active_at=at)
+            .on_conflict_do_nothing(index_elements=["user_id"])
+        )
         return
 
     activity_day = at.astimezone(timezone.utc).date()

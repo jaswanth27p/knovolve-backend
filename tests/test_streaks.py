@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from app.db import SessionLocal
 from app.models.user import User
 from app.models.learner_streak import LearnerStreak
