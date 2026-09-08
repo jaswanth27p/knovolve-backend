@@ -69,7 +69,7 @@ def test_get_assignment_dispatches_when_missing_then_returns_ready():
                                       concept_tag="t", difficulty="easy"))
             db.commit()
 
-    with patch("app.routes.courses.generate_chapter_assignment_task") as mock_task:
+    with patch("app.services.assignments.generate_chapter_assignment_task") as mock_task:
         mock_task.delay.side_effect = _fake_generate
         resp = client.get(f"/courses/asg-api-b/chapters/{chapter_id}/assignment", headers=headers)
 
@@ -89,7 +89,7 @@ def test_get_assignment_returns_generating_when_task_has_not_run_yet():
     headers = _auth_headers("asg-api-c@example.com")
     chapter_id, _ = _make_course_with_ready_chapter("asg-api-c")
 
-    with patch("app.routes.courses.generate_chapter_assignment_task") as mock_task:
+    with patch("app.services.assignments.generate_chapter_assignment_task") as mock_task:
         resp = client.get(f"/courses/asg-api-c/chapters/{chapter_id}/assignment", headers=headers)
 
     assert resp.status_code == 200
@@ -106,7 +106,7 @@ def test_get_assignment_retries_a_failed_assignment():
                           updated_at=datetime.now(timezone.utc)))
         db.commit()
 
-    with patch("app.routes.courses.generate_chapter_assignment_task") as mock_task:
+    with patch("app.services.assignments.generate_chapter_assignment_task") as mock_task:
         resp = client.get(f"/courses/asg-api-d/chapters/{chapter_id}/assignment", headers=headers)
 
     assert resp.status_code == 200
@@ -156,7 +156,7 @@ def test_post_module_assignment_dispatches_and_returns_ready():
                                       concept_tag="t", difficulty="medium"))
             db.commit()
 
-    with patch("app.routes.courses.generate_module_assignment_task") as mock_task:
+    with patch("app.services.assignments.generate_module_assignment_task") as mock_task:
         mock_task.delay.side_effect = _fake_generate
         resp = client.post(f"/courses/asg-api-mod-b/modules/{module_id}/assignment", headers=headers)
 
@@ -174,7 +174,7 @@ def test_get_module_assignment_retries_when_missing():
     headers = _auth_headers("asg-api-mod-c@example.com")
     _, module_id = _make_module_via_api("asg-api-mod-c", chapter_count=1, all_ready=True)
 
-    with patch("app.routes.courses.generate_module_assignment_task") as mock_task:
+    with patch("app.services.assignments.generate_module_assignment_task") as mock_task:
         resp = client.get(f"/courses/asg-api-mod-c/modules/{module_id}/assignment", headers=headers)
 
     assert resp.status_code == 200
