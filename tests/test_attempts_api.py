@@ -145,3 +145,104 @@ def test_submit_400_when_duplicate_question_id():
         headers=headers,
     )
     assert resp.status_code == 400
+
+
+def test_get_attempt_requires_auth():
+    resp = client.get("/courses/nonexistent/assignments/1/attempts/1")
+    assert resp.status_code == 401
+
+
+def test_get_attempt_returns_grading_status():
+    headers = _auth_headers("att-api-f@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-f", question_count=1)
+    with patch("app.routes.courses.grade_assignment_attempt_task"):
+        submit_resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
+            headers=headers,
+        )
+    attempt_id = submit_resp.json()["attempt_id"]
+
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "grading"
+    assert resp.json()["answers"] is None
+
+
+def test_get_attempt_returns_graded_result_with_concept_breakdown():
+    headers = _auth_headers("att-api-g@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-g", question_count=1)
+
+    def _fake_grade(attempt_id):
+        with SessionLocal() as db:
+            attempt = db.get(AssignmentAttempt, attempt_id)
+            answer = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).one()
+            answer.is_correct = True
+            answer.feedback = "Correct."
+            answer.graded_at = _now()
+            attempt.status = "graded"
+            attempt.overall_score = 1.0
+            db.commit()
+
+    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task:
+        mock_task.delay.side_effect = _fake_grade
+        submit_resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
+            headers=headers,
+        )
+    attempt_id = submit_resp.json()["attempt_id"]
+
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "graded"
+    assert body["overall_score"] == 1.0
+    assert len(body["answers"]) == 1
+    assert body["answers"][0]["is_correct"] is True
+    assert body["concept_scores"] == [{"concept_tag": "t", "correct": 1, "total": 1}]
+
+
+def test_get_attempt_failed_status_does_not_auto_retry():
+    headers = _auth_headers("att-api-h@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-h", question_count=1)
+
+    def _fake_fail(attempt_id):
+        with SessionLocal() as db:
+            attempt = db.get(AssignmentAttempt, attempt_id)
+            attempt.status = "failed"
+            attempt.error = "llm down"
+            db.commit()
+
+    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task:
+        mock_task.delay.side_effect = _fake_fail
+        submit_resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
+            headers=headers,
+        )
+    attempt_id = submit_resp.json()["attempt_id"]
+
+    with patch("app.routes.courses.grade_assignment_attempt_task") as mock_task_on_get:
+        resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
+    assert resp.json()["error"] == "llm down"
+    mock_task_on_get.delay.assert_not_called()  # unlike the assignment GET routes, no auto-retry
+
+
+def test_get_attempt_404_for_another_users_attempt():
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-i", question_count=1)
+    owner_headers = _auth_headers("att-api-i-owner@example.com")
+    with patch("app.routes.courses.grade_assignment_attempt_task"):
+        submit_resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
+            headers=owner_headers,
+        )
+    attempt_id = submit_resp.json()["attempt_id"]
+
+    other_headers = _auth_headers("att-api-i-other@example.com")
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=other_headers)
+    assert resp.status_code == 404
