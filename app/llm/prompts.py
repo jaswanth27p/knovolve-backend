@@ -368,38 +368,56 @@ GENERATE_TOPUP_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 # ---------------------------------------------------------------------------
-# grade_free_text_answers.grade_free_text_answers
+# grade_assignment_answers.grade_assignment_answers
 # ---------------------------------------------------------------------------
 # Grades every free-text answer in one attempt with a SINGLE call rather than
 # one call per question — same batching discipline as
-# GENERATE_SECTION_QUESTIONS_PROMPT, which asks for every sub-topic's
-# question in one call rather than one call per sub-topic. Pure LLM
-# judgment this pass (semantic-similarity/embedding grading is the deferred
-# ML item in the top-level spec's section 5) — the judgment call is whether
-# the learner's answer conveys the same understanding as the model answer,
-# not an exact string match.
-GRADE_FREE_TEXT_ANSWERS_PROMPT = ChatPromptTemplate.from_messages(
+# GENERATE_SECTION_QUESTIONS_PROMPT. Extended per spec 03 to also reason
+# holistically over the WHOLE attempt (including already-known mcq/true_false
+# results, given as context) and emit a remediation-targeting verdict — this
+# runs even when there are zero free-text questions, since the verdict output
+# is needed regardless of question mix.
+GRADE_ASSIGNMENT_ANSWERS_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are grading a learner's free-text answers for Knovolve, an "
-            "adaptive learning platform. For each question below, decide "
-            "whether the learner's answer demonstrates correct "
-            "understanding compared to the model answer and explanation — "
-            "not an exact-wording match, a judgment of whether they "
-            "understood the concept. Grade every question given; do not "
-            "skip any.\n\n"
-            "For each question return:\n"
-            "- `question_id`: copy verbatim from the input.\n"
-            "- `is_correct`: true if the learner's answer demonstrates "
-            "correct understanding, false otherwise.\n"
-            "- `feedback`: one or two sentences telling the learner why "
-            "their answer was correct or incorrect, referencing the model "
-            "answer/explanation where useful.",
+            "You are grading a learner's assignment attempt for Knovolve, an "
+            "adaptive learning platform, and deciding what (if anything) they "
+            "should be re-taught.\n\n"
+            "Part 1 — grade the free-text answers below. For each one, decide "
+            "whether the learner's answer demonstrates correct understanding "
+            "compared to the model answer and explanation — not an "
+            "exact-wording match, a judgment of whether they understood the "
+            "concept. Grade every free-text question given; do not skip any. "
+            "For each return: `question_id` (copy verbatim), `is_correct`, "
+            "`feedback` (one or two sentences explaining why, referencing the "
+            "model answer/explanation where useful), and `misconception_tag` "
+            "(a short label for the SPECIFIC misunderstanding behind a wrong "
+            "answer, e.g. \"confuses-stack-and-heap\" — null if the answer is "
+            "correct).\n\n"
+            "Part 2 — the already-graded questions below (multiple-choice / "
+            "true-false, graded by exact match — not your job to re-grade "
+            "them) are given for context only.\n\n"
+            "Part 3 — reasoning over ALL questions above (both the free-text "
+            "ones you just graded and the already-graded ones), decide "
+            "`remediation_concept_tags`: the concept tags that genuinely "
+            "warrant a new, targeted re-teach. This is a holistic judgment, "
+            "not just 'list every concept with a wrong answer' — a learner "
+            "can miss one minor question on a concept they otherwise clearly "
+            "understand, and that concept should NOT appear here. Only "
+            "include a concept when the pattern of answers shows a real gap. "
+            "Empty list if nothing warrants re-teaching. Also give "
+            "`verdict_reasoning`: two to four sentences explaining your "
+            "overall judgment of this attempt, referencing specific "
+            "questions/concepts.",
         ),
         (
             "human",
-            "{items_text}\n\nGrade all {count} questions above.",
+            "Free-text questions to grade ({free_text_count}):\n"
+            "{free_text_text}\n\n"
+            "Already-graded questions (context only, do not re-grade):\n"
+            "{known_text}\n\n"
+            "Grade the free-text questions and give your holistic verdict.",
         ),
     ]
 )
