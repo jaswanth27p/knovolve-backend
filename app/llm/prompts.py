@@ -287,3 +287,82 @@ GENERATE_CHAPTER_SECTION_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# generate_section_questions.generate_questions_for_section
+# ---------------------------------------------------------------------------
+# A section can cover more than one important sub-topic (e.g. a section that
+# both defines a term AND walks through its main gotcha) — the model must
+# identify each one and ask about it, rather than defaulting to one generic
+# question per section. `concept_tag` on each question is the SPECIFIC
+# sub-topic that question targets, not the section heading, since future
+# remediation (V2+) and ML labeling (spec section 5) need concept-level
+# granularity, not section-level.
+GENERATE_SECTION_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert assessment writer for Knovolve, an adaptive "
+            "learning platform. Given one teaching section's content, first "
+            "identify every important, distinct sub-topic or concept it "
+            "actually teaches (there may be just one, or several) — then "
+            "write exactly one assessment question per identified "
+            "sub-topic.\n\n"
+            "Requirements per question:\n"
+            "- `type`: choose whichever of \"mcq\", \"true_false\", or "
+            "\"free_text\" best fits testing that specific sub-topic.\n"
+            "- `options`: for \"mcq\" only, 2-5 plausible choices including "
+            "the correct one; omit (null) for \"true_false\"/\"free_text\".\n"
+            "- `correct_answer`: the correct option text (mcq), \"true\" or "
+            "\"false\" (true_false), or a model answer (free_text).\n"
+            "- `explanation`: why that answer is correct, shown to the "
+            "learner after grading.\n"
+            "- `concept_tag`: the SPECIFIC sub-topic this question targets — "
+            "never the section heading verbatim unless the section only "
+            "covers one thing.\n"
+            "- `difficulty`: \"easy\", \"medium\", or \"hard\", based on how "
+            "much the section emphasized/elaborated that sub-topic.\n"
+            "Do not ask about anything not actually covered in the section "
+            "content given.",
+        ),
+        (
+            "human",
+            "Chapter: {chapter_title} — {chapter_objective}\n"
+            "Section heading: {heading}\n"
+            "Section content:\n{body_markdown}\n\n"
+            "Section examples:\n{examples_text}\n\n"
+            "Identify this section's sub-topics and write one question per "
+            "sub-topic.",
+        ),
+    ]
+)
+
+# ---------------------------------------------------------------------------
+# generate_topup_questions.generate_topup_questions
+# ---------------------------------------------------------------------------
+# Only invoked when per-section generation falls short of the 3-question
+# floor (a short chapter/module with shallow sections) — draws from the
+# WHOLE chapter's (or module's) content rather than one section, since by
+# definition every section has already had its own sub-topics covered.
+GENERATE_TOPUP_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert assessment writer for Knovolve, an adaptive "
+            "learning platform. You already generated one question per "
+            "sub-topic for each section below, but the total fell short of "
+            "the minimum question count. Write EXACTLY {count} additional "
+            "assessment questions drawn from anywhere in the content below, "
+            "covering topics not yet emphasized rather than duplicating "
+            "coverage. Same per-question requirements as before: `type` "
+            "(mcq/true_false/free_text), `options` (mcq only, 2-5), "
+            "`correct_answer`, `explanation`, `concept_tag` (specific, not "
+            "generic), `difficulty`.",
+        ),
+        (
+            "human",
+            "{title} — {objective}\n\n{sections_text}\n\n"
+            "Write exactly {count} additional questions.",
+        ),
+    ]
+)
