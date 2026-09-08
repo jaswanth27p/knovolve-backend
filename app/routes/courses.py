@@ -29,7 +29,7 @@ from app.agents.course_creation.checkpoints import purge_checkpoints
 from app.agents.chapter_content.generate import stream_chapter_content
 from app.realtime.chapter_content_events import channel_name
 from app.tasks.course_creation_task import run_course_creation_job
-from app.tasks.assignment_tasks import generate_chapter_assignment_task
+from app.tasks.assignment_tasks import generate_chapter_assignment_task, generate_module_assignment_task
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +381,62 @@ def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get
     if assignment is None or assignment.status == "failed":
         generate_chapter_assignment_task.delay(content.id)  # pyright: ignore[reportFunctionMemberAccess]
         assignment = db.scalar(select(Assignment).where(Assignment.chapter_content_id == content.id))
+    if assignment is None:
+        return AssignmentResponse(status="generating")
+    return _serialize_assignment(assignment, db)
+
+
+def _module_chapters_ready(module: Module, db: Session) -> bool:
+    chapters = db.query(Chapter).filter_by(module_id=module.id).all()
+    if not chapters:
+        return False
+    for chapter in chapters:
+        content = db.scalar(
+            select(ChapterContent).where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global")
+        )
+        if content is None or content.status != "ready":
+            return False
+    return True
+
+
+@router.post("/{slug}/modules/{module_id}/assignment", response_model=AssignmentResponse, status_code=202)
+def create_module_assignment(slug: str, module_id: int, response: Response,
+                              db: Session = Depends(get_session), user=Depends(get_current_user)):
+    course = db.scalar(select(Course).where(Course.topic_slug == slug))
+    if not course:
+        raise HTTPException(status_code=404, detail="course not found")
+    module = db.query(Module).filter_by(id=module_id, course_id=course.id).first()
+    if not module:
+        raise HTTPException(status_code=404, detail="module not found")
+    if not _module_chapters_ready(module, db):
+        raise HTTPException(status_code=409, detail="not all chapters in this module have ready content")
+
+    assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+    if assignment is None or assignment.status == "failed":
+        generate_module_assignment_task.delay(module.id)  # pyright: ignore[reportFunctionMemberAccess]
+        assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+    if assignment is None:
+        return AssignmentResponse(status="generating")
+    response.status_code = 200 if assignment.status == "ready" else 202
+    return _serialize_assignment(assignment, db)
+
+
+@router.get("/{slug}/modules/{module_id}/assignment", response_model=AssignmentResponse)
+def get_module_assignment(slug: str, module_id: int, db: Session = Depends(get_session),
+                           user=Depends(get_current_user)):
+    course = db.scalar(select(Course).where(Course.topic_slug == slug))
+    if not course:
+        raise HTTPException(status_code=404, detail="course not found")
+    module = db.query(Module).filter_by(id=module_id, course_id=course.id).first()
+    if not module:
+        raise HTTPException(status_code=404, detail="module not found")
+
+    assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
+    if assignment is None or assignment.status == "failed":
+        if not _module_chapters_ready(module, db):
+            raise HTTPException(status_code=409, detail="not all chapters in this module have ready content")
+        generate_module_assignment_task.delay(module.id)  # pyright: ignore[reportFunctionMemberAccess]
+        assignment = db.scalar(select(Assignment).where(Assignment.module_id == module.id))
     if assignment is None:
         return AssignmentResponse(status="generating")
     return _serialize_assignment(assignment, db)

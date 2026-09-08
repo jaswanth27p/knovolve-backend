@@ -106,3 +106,74 @@ def test_get_assignment_retries_a_failed_assignment():
 
     assert resp.status_code == 200
     mock_task.delay.assert_called_once_with(content_id)
+
+
+def _make_module_via_api(slug: str, chapter_count: int = 1, all_ready: bool = True) -> tuple[int, int]:
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        for i in range(chapter_count):
+            chapter = Chapter(module_id=module.id, title=f"C{i}", objective="o", order=i)
+            db.add(chapter)
+            db.commit()
+            content = ChapterContent(chapter_id=chapter.id, version=1, scope="global",
+                                      status="ready" if all_ready else "generating",
+                                      outline=[], created_at=now, updated_at=now)
+            db.add(content)
+            db.commit()
+        return course.id, module.id
+
+
+def test_post_module_assignment_409_when_a_chapter_not_ready():
+    headers = _auth_headers("asg-api-mod-a@example.com")
+    _, module_id = _make_module_via_api("asg-api-mod-a", chapter_count=1, all_ready=False)
+    resp = client.post(f"/courses/asg-api-mod-a/modules/{module_id}/assignment", headers=headers)
+    assert resp.status_code == 409
+
+
+def test_post_module_assignment_dispatches_and_returns_ready():
+    headers = _auth_headers("asg-api-mod-b@example.com")
+    _, module_id = _make_module_via_api("asg-api-mod-b", chapter_count=1, all_ready=True)
+
+    def _fake_generate(m_id):
+        with SessionLocal() as db:
+            assignment = Assignment(level="module", module_id=m_id, scope="global", status="ready",
+                                    created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+            db.add(assignment)
+            db.commit()
+            db.add(AssignmentQuestion(assignment_id=assignment.id, order=0, type="true_false", text="q",
+                                      options=None, correct_answer="true", explanation="e",
+                                      concept_tag="t", difficulty="medium"))
+            db.commit()
+
+    with patch("app.routes.courses.generate_module_assignment_task") as mock_task:
+        mock_task.delay.side_effect = _fake_generate
+        resp = client.post(f"/courses/asg-api-mod-b/modules/{module_id}/assignment", headers=headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ready"
+    mock_task.delay.assert_called_once_with(module_id)
+
+
+def test_get_module_assignment_retries_when_missing():
+    headers = _auth_headers("asg-api-mod-c@example.com")
+    _, module_id = _make_module_via_api("asg-api-mod-c", chapter_count=1, all_ready=True)
+
+    with patch("app.routes.courses.generate_module_assignment_task") as mock_task:
+        resp = client.get(f"/courses/asg-api-mod-c/modules/{module_id}/assignment", headers=headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "generating"
+    mock_task.delay.assert_called_once_with(module_id)
+
+
+def test_get_module_assignment_409_when_a_chapter_not_ready_and_nothing_generated_yet():
+    headers = _auth_headers("asg-api-mod-d@example.com")
+    _, module_id = _make_module_via_api("asg-api-mod-d", chapter_count=1, all_ready=False)
+    resp = client.get(f"/courses/asg-api-mod-d/modules/{module_id}/assignment", headers=headers)
+    assert resp.status_code == 409
