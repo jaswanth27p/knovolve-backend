@@ -16,7 +16,9 @@ from app.auth.dependencies import get_current_user
 from app.models.course import Course, CourseJob, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.enrollment import UserCourse
+from app.models.assignment import Assignment, AssignmentQuestion
 from app.schemas.course import CreateCourseRequest, CourseJobResponse, PublicCourseResponse
+from app.schemas.assignment import AssignmentQuestionResponse, AssignmentResponse
 from app.agents.course_creation.nodes.normalize_topic import (
     _canonicalize,
     _slugify,
@@ -27,6 +29,7 @@ from app.agents.course_creation.checkpoints import purge_checkpoints
 from app.agents.chapter_content.generate import stream_chapter_content
 from app.realtime.chapter_content_events import channel_name
 from app.tasks.course_creation_task import run_course_creation_job
+from app.tasks.assignment_tasks import generate_chapter_assignment_task
 
 logger = logging.getLogger(__name__)
 
@@ -329,3 +332,55 @@ def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_se
         yield json.dumps(terminal or {"type": "done"}) + "\n"
 
     return StreamingResponse(_generate(), media_type="application/x-ndjson")
+
+
+def _serialize_assignment(assignment: Assignment, db: Session) -> AssignmentResponse:
+    if assignment.status != "ready":
+        return AssignmentResponse(status=assignment.status, error=assignment.error)
+    questions = (
+        db.query(AssignmentQuestion)
+        .filter_by(assignment_id=assignment.id)
+        .order_by(AssignmentQuestion.order)
+        .all()
+    )
+    return AssignmentResponse(
+        status="ready",
+        questions=[
+            AssignmentQuestionResponse(
+                id=q.id, order=q.order, type=q.type, text=q.text, options=q.options,
+                correct_answer=q.correct_answer, explanation=q.explanation,
+                concept_tag=q.concept_tag, difficulty=q.difficulty,
+            )
+            for q in questions
+        ],
+    )
+
+
+@router.get("/{slug}/chapters/{chapter_id}/assignment", response_model=AssignmentResponse)
+def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get_session),
+                            user=Depends(get_current_user)):
+    course = db.scalar(select(Course).where(Course.topic_slug == slug))
+    if not course:
+        raise HTTPException(status_code=404, detail="course not found")
+    chapter = (
+        db.query(Chapter)
+        .join(Module, Chapter.module_id == Module.id)
+        .filter(Chapter.id == chapter_id, Module.course_id == course.id)
+        .first()
+    )
+    if not chapter:
+        raise HTTPException(status_code=404, detail="chapter not found")
+
+    content = db.scalar(
+        select(ChapterContent).where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global")
+    )
+    if content is None or content.status != "ready":
+        raise HTTPException(status_code=404, detail="chapter content not ready")
+
+    assignment = db.scalar(select(Assignment).where(Assignment.chapter_content_id == content.id))
+    if assignment is None or assignment.status == "failed":
+        generate_chapter_assignment_task.delay(content.id)  # pyright: ignore[reportFunctionMemberAccess]
+        assignment = db.scalar(select(Assignment).where(Assignment.chapter_content_id == content.id))
+    if assignment is None:
+        return AssignmentResponse(status="generating")
+    return _serialize_assignment(assignment, db)
