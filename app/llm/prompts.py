@@ -366,3 +366,40 @@ GENERATE_TOPUP_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# grade_free_text_answers.grade_free_text_answers
+# ---------------------------------------------------------------------------
+# Grades every free-text answer in one attempt with a SINGLE call rather than
+# one call per question — same batching discipline as
+# GENERATE_SECTION_QUESTIONS_PROMPT, which asks for every sub-topic's
+# question in one call rather than one call per sub-topic. Pure LLM
+# judgment this pass (semantic-similarity/embedding grading is the deferred
+# ML item in the top-level spec's section 5) — the judgment call is whether
+# the learner's answer conveys the same understanding as the model answer,
+# not an exact string match.
+GRADE_FREE_TEXT_ANSWERS_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are grading a learner's free-text answers for Knovolve, an "
+            "adaptive learning platform. For each question below, decide "
+            "whether the learner's answer demonstrates correct "
+            "understanding compared to the model answer and explanation — "
+            "not an exact-wording match, a judgment of whether they "
+            "understood the concept. Grade every question given; do not "
+            "skip any.\n\n"
+            "For each question return:\n"
+            "- `question_id`: copy verbatim from the input.\n"
+            "- `is_correct`: true if the learner's answer demonstrates "
+            "correct understanding, false otherwise.\n"
+            "- `feedback`: one or two sentences telling the learner why "
+            "their answer was correct or incorrect, referencing the model "
+            "answer/explanation where useful.",
+        ),
+        (
+            "human",
+            "{items_text}\n\nGrade all {count} questions above.",
+        ),
+    ]
+)
