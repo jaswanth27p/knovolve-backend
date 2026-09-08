@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import app.models  # noqa: F401  (registers every model on Base.metadata before any request runs)
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.observability import (

@@ -4,6 +4,7 @@ from celery import Celery
 
 from app.config import settings
 from app.observability import instrument_static, setup_logging, setup_tracing
+import app.models  # noqa: F401  (registers every model on Base.metadata before any task runs)
 
 setup_tracing()
 setup_logging()
