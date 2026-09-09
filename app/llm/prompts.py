@@ -44,10 +44,17 @@ CANONICALIZE_TOPIC_PROMPT = ChatPromptTemplate.from_messages(
             "TypeScript generics, not become a general TypeScript title).\n"
             "- Do not add a colon-separated subtitle, a course number, or "
             "marketing language (no 'Mastering', 'Ultimate Guide to', etc.).\n"
+            "- If the input is a single word, misspelled, oddly capitalized, "
+            "very broad, or otherwise messy, still produce your best-effort "
+            "clean title by these same rules — never ask a clarifying "
+            "question, never refuse, never output an error message or "
+            "placeholder text. There is always a valid title to produce.\n"
             "- Respond with the title and absolutely nothing else: no quotes, "
             "no markdown, no punctuation at the end, no prefix like 'Title:', "
             "no explanation. Your entire response is used verbatim as the "
-            "course title.",
+            "course title.\n\n"
+            "Example — input 'js promises basics' -> output exactly: "
+            "JavaScript Promises Fundamentals",
         ),
         ("human", "Raw topic: {topic_raw}"),
     ]
@@ -215,13 +222,16 @@ GENERATE_SECTION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
             "sequence of content sections that together fully teach the "
             "chapter's objective.\n\n"
             "Requirements:\n"
-            "- Tag each section's `kind` as \"intro\" ONLY if it is pure "
-            "orientation/framing with nothing yet to apply (e.g. a brief "
-            "'why this matters' opener) — every section that actually "
-            "teaches a concept or skill must be tagged \"teaching\", even if "
-            "it also does some framing.\n"
-            "- Use at most one \"intro\" section, and only when the chapter "
-            "genuinely benefits from one — most chapters don't need one.\n"
+            "- Decision rule for `kind`: ask \"does this section teach a "
+            "concept, technique, or fact the learner needs to apply later?\" "
+            "If yes, `kind` MUST be \"teaching\" — this applies even if the "
+            "section also opens with framing or motivation. Tag a section "
+            "\"intro\" ONLY if the answer is no: it is pure orientation with "
+            "nothing to apply (e.g. a one-paragraph 'why this matters' "
+            "opener with no new fact or skill in it).\n"
+            "- At most ONE section may be tagged \"intro\", and only as the "
+            "very first section. If you are unsure whether a section counts "
+            "as \"intro\", tag it \"teaching\" — that is the safe default.\n"
             "- Order sections so each builds on the previous one (strict "
             "learning-order progression within the chapter).\n"
             "- Write each objective as a concrete, assessable statement of "
@@ -317,9 +327,15 @@ GENERATE_SECTION_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
             "\"false\" (true_false), or a model answer (free_text).\n"
             "- `explanation`: why that answer is correct, shown to the "
             "learner after grading.\n"
-            "- `concept_tag`: the SPECIFIC sub-topic this question targets — "
-            "never the section heading verbatim unless the section only "
-            "covers one thing.\n"
+            "- `concept_tag`: a short, stable, kebab-case label for the "
+            "SPECIFIC sub-topic this question targets (e.g. "
+            "\"closure-scope-capture\") — never the section heading verbatim "
+            "unless the section only covers one thing. This tag is used "
+            "downstream to group and track a learner's mastery per concept, "
+            "so it MUST be reused character-for-character: if two questions "
+            "in this same response target the same sub-topic, give them the "
+            "exact same `concept_tag` string — do not vary wording, casing, "
+            "or punctuation between them.\n"
             "- `difficulty`: \"easy\", \"medium\", or \"hard\", based on how "
             "much the section emphasized/elaborated that sub-topic.\n"
             "Do not ask about anything not actually covered in the section "
@@ -356,8 +372,11 @@ GENERATE_TOPUP_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
             "covering topics not yet emphasized rather than duplicating "
             "coverage. Same per-question requirements as before: `type` "
             "(mcq/true_false/free_text), `options` (mcq only, 2-5), "
-            "`correct_answer`, `explanation`, `concept_tag` (specific, not "
-            "generic), `difficulty`.",
+            "`correct_answer`, `explanation`, `concept_tag` (a short, stable, "
+            "kebab-case label for the specific sub-topic — if two of your "
+            "questions target the same sub-topic, reuse the exact same tag "
+            "string, character-for-character, for both), `difficulty`. "
+            "Write exactly {count} questions — not fewer, not more.",
         ),
         (
             "human",
@@ -385,11 +404,15 @@ GENERATE_WEAK_CONCEPT_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
             "concepts: {concept_tags}. Write EXACTLY {count} assessment "
             "questions drawn from the content below, each one targeting at "
             "least one of those concepts directly — do not write generic "
-            "questions unrelated to the listed concepts. Same per-question "
-            "requirements as before: `type` (mcq/true_false/free_text), "
-            "`options` (mcq only, 2-5), `correct_answer`, `explanation`, "
-            "`concept_tag` (specific, not generic — should match or closely "
-            "relate to one of the listed concepts), `difficulty`.",
+            "questions unrelated to the listed concepts. For each question, "
+            "set `concept_tag` to ONE of the exact strings listed in "
+            "{concept_tags} above, copied character-for-character — never "
+            "paraphrase, reformat, or invent a new tag; if a question "
+            "reasonably targets more than one listed concept, pick the "
+            "single closest match. Same per-question requirements as "
+            "before: `type` (mcq/true_false/free_text), `options` (mcq only, "
+            "2-5), `correct_answer`, `explanation`, `difficulty`. Write "
+            "exactly {count} questions — not fewer, not more.",
         ),
         (
             "human",
@@ -431,18 +454,39 @@ GRADE_ASSIGNMENT_ANSWERS_PROMPT = ChatPromptTemplate.from_messages(
             "Part 2 — the already-graded questions below (multiple-choice / "
             "true-false, graded by exact match — not your job to re-grade "
             "them) are given for context only.\n\n"
-            "Part 3 — reasoning over ALL questions above (both the free-text "
-            "ones you just graded and the already-graded ones), decide "
-            "`remediation_concept_tags`: the concept tags that genuinely "
-            "warrant a new, targeted re-teach. This is a holistic judgment, "
-            "not just 'list every concept with a wrong answer' — a learner "
-            "can miss one minor question on a concept they otherwise clearly "
-            "understand, and that concept should NOT appear here. Only "
-            "include a concept when the pattern of answers shows a real gap. "
-            "Empty list if nothing warrants re-teaching. Also give "
-            "`verdict_reasoning`: two to four sentences explaining your "
-            "overall judgment of this attempt, referencing specific "
-            "questions/concepts.",
+            "Part 3 — decide `remediation_concept_tags` by following this "
+            "EXACT procedure, in order:\n"
+            "1. Every question above (free-text and already-graded) is "
+            "labeled with a concept tag in square brackets, e.g. "
+            "\"Question 7 [loop-invariants]: ...\". Group ALL questions — "
+            "free-text and already-graded together — by that exact bracket "
+            "string.\n"
+            "2. For each group, count how many of its questions the learner "
+            "got wrong (free-text: `is_correct=false` from Part 1; "
+            "already-graded: marked \"incorrect\" in the context below).\n"
+            "3. Include that group's tag in `remediation_concept_tags` if "
+            "EITHER: (a) the learner got every question in that group wrong, "
+            "or (b) the learner got more than half of that group's questions "
+            "wrong. A concept where the learner missed a minority of "
+            "questions (e.g. 1 wrong out of 3, with the rest correct) does "
+            "NOT qualify — that is normal, not a gap, so leave it out.\n"
+            "4. Every string you put in `remediation_concept_tags` MUST be "
+            "copied character-for-character from inside a question's square "
+            "brackets above — never invent, paraphrase, merge, reformat, or "
+            "guess a tag. A tag that does not appear verbatim in brackets "
+            "above is useless downstream and will be silently discarded, so "
+            "double-check each one against the bracketed text before "
+            "including it.\n"
+            "5. If every group qualifies under step 3 (e.g. the learner got "
+            "everything or nearly everything wrong), include ALL of those "
+            "tags — do not artificially shorten the list. If no group "
+            "qualifies, return an empty list.\n"
+            "Also give `verdict_reasoning`: two to four sentences explaining "
+            "your overall judgment of this attempt, referencing specific "
+            "questions/concepts — this must be consistent with "
+            "`remediation_concept_tags` (e.g. if you say the learner needs a "
+            "comprehensive re-teach, `remediation_concept_tags` must not be "
+            "empty).",
         ),
         (
             "human",
@@ -450,7 +494,9 @@ GRADE_ASSIGNMENT_ANSWERS_PROMPT = ChatPromptTemplate.from_messages(
             "{free_text_text}\n\n"
             "Already-graded questions (context only, do not re-grade):\n"
             "{known_text}\n\n"
-            "Grade the free-text questions and give your holistic verdict.",
+            "Grade the free-text questions, then work through the 5-step "
+            "procedure above to produce `remediation_concept_tags`, then give "
+            "`verdict_reasoning`.",
         ),
     ]
 )

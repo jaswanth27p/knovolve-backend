@@ -118,6 +118,22 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
         # tag — and drive which sections get generated.
         allowed_tags = {q.concept_tag for q in questions.values()}
         remediation_concept_tags = [t for t in grading.remediation_concept_tags if t in allowed_tags]
+        # Deterministic backstop, independent of the LLM actually following the
+        # grading prompt's tagging procedure: a concept every one of whose
+        # questions the learner got wrong is an unambiguous gap by any
+        # definition, so it always qualifies for remediation even if the LLM's
+        # own `remediation_concept_tags` missed or mis-copied it.
+        wrong_counts: dict[str, int] = {}
+        total_counts: dict[str, int] = {}
+        for answer in answers:
+            tag = questions[answer.question_id].concept_tag
+            total_counts[tag] = total_counts.get(tag, 0) + 1
+            if not answer.is_correct:
+                wrong_counts[tag] = wrong_counts.get(tag, 0) + 1
+        all_wrong_tags = [tag for tag, total in total_counts.items() if wrong_counts.get(tag, 0) == total]
+        for tag in all_wrong_tags:
+            if tag not in remediation_concept_tags:
+                remediation_concept_tags.append(tag)
         db.commit()
     except Exception as exc:
         # Rolls back any in-session, uncommitted grading (e.g. mcq/true_false
