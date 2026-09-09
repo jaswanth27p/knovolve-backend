@@ -27,7 +27,7 @@ from app.models.chapter_content import ChapterContent
 from app.agents.evaluation.nodes.grade_assignment_answers import (
     FreeTextAnswerItem, KnownAnswerItem, grade_assignment_answers,
 )
-from app.services import streaks
+from app.services import progression, streaks
 from app.tasks.chapter_content_tasks import remediate_chapter_task
 
 
@@ -136,3 +136,7 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
             remediate_chapter_task.delay(  # pyright: ignore[reportFunctionMemberAccess]
                 content.chapter_id, attempt.user_id, remediation_concept_tags, attempt.id,
             )
+
+    course_id = progression.resolve_course_id(db, assignment)
+    if course_id is not None:
+        progression.update_course_progress(db, attempt.user_id, course_id)

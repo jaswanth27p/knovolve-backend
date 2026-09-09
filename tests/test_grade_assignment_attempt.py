@@ -499,3 +499,37 @@ def test_idempotent_regrade_does_not_double_record_streak_activity():
     with SessionLocal() as db:
         streak = db.query(LearnerStreak).filter_by(user_id=user_id).one_or_none()
         assert streak is None
+
+
+def test_grading_updates_course_progress_when_enrolled():
+    from app.models.enrollment import UserCourse
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-progress", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "loops"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "a"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        assignment = db.get(Assignment, assignment_id)
+        assert assignment is not None and assignment.chapter_content_id is not None
+        content = db.get(ChapterContent, assignment.chapter_content_id)
+        assert content is not None
+        chapter = db.get(Chapter, content.chapter_id)
+        assert chapter is not None
+        module = db.get(Module, chapter.module_id)
+        assert module is not None
+        db.add(UserCourse(user_id=attempt.user_id, course_id=module.course_id, status="in_progress",
+                           progress=0.0, enrolled_at=_now(), last_opened_at=_now()))
+        db.commit()
+
+    fake_response = GradingResponse(grades=[], remediation_concept_tags=[], verdict_reasoning="ok")
+    with patch("app.agents.evaluation.grade.grade_assignment_answers", return_value=fake_response):
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    with SessionLocal() as db:
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        uc = db.query(UserCourse).filter_by(user_id=attempt.user_id).one()
+        assert uc.progress == 1.0
+        assert uc.status == "completed"
