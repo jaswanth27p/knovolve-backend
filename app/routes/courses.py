@@ -61,7 +61,7 @@ def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_se
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(
-        _encode(chapter_content.stream_content_events(chapter, db)),
+        _encode(chapter_content.stream_content_events(chapter, db, user.id)),
         media_type="application/x-ndjson",
     )
 
@@ -71,7 +71,7 @@ def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get
                             user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     chapter = chapter_content.get_chapter(db, course, chapter_id)
-    return assignments.get_chapter_assignment(db, chapter)
+    return assignments.get_chapter_assignment(db, chapter, user.id)
 
 
 @router.post("/{slug}/modules/{module_id}/assignment", response_model=AssignmentResponse, status_code=202)

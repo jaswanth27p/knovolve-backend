@@ -19,6 +19,7 @@ from app.agents.chapter_content.nodes.generate_chapter_section import generate_c
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
 from app.tasks.assignment_tasks import generate_chapter_assignment_task
+from app.tasks.chapter_content_tasks import remediate_chapter_task
 from app.tasks.render_diagram_task import render_diagram_task
 
 
@@ -63,8 +64,27 @@ def _get_or_create_content(chapter_id: int, db: Session) -> ChapterContent:
     return content
 
 
-def stream_chapter_content(chapter: Chapter, db: Session) -> Iterator[dict]:
-    content = _get_or_create_content(chapter.id, db)
+def _resolve_content_for_user(chapter_id: int, user_id: int, db: Session) -> ChapterContent:
+    """Same precedence as `progression._resolve_relevant_content`: this
+    user's own latest remediation (scope="user") version if one exists,
+    else the chapter's shared scope="global" version — created on first
+    open if it doesn't exist yet. Kept as a separate lookup (not a straight
+    import of the private helper) because this one must also fall through to
+    `_get_or_create_content`'s create-on-first-open behavior, which
+    `progression`'s read-only helper deliberately doesn't do."""
+    user_content = db.scalar(
+        select(ChapterContent)
+        .where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "user", ChapterContent.user_id == user_id)
+        .order_by(ChapterContent.version.desc())
+        .limit(1)
+    )
+    if user_content is not None:
+        return user_content
+    return _get_or_create_content(chapter_id, db)
+
+
+def stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Iterator[dict]:
+    content = _resolve_content_for_user(chapter.id, user_id, db)
 
     existing = (
         db.query(ChapterContentSection)
@@ -76,6 +96,29 @@ def stream_chapter_content(chapter: Chapter, db: Session) -> Iterator[dict]:
         yield _section_event(section)
 
     if content.status == "ready":
+        yield {"type": "done"}
+        return
+
+    if content.scope == "user":
+        # A remediation (V2+) version is authored exclusively by the
+        # background `remediate_chapter_task` (dispatched at grading time,
+        # see app.agents.evaluation.grade), using the narrow
+        # generate_remediation_outline — never inline here. Generating it
+        # inline with this file's own generate_section_outline would author
+        # a full chapter re-teach instead of the targeted few sections the
+        # learner actually needs, and would race the background task to
+        # write the same row. So: report status and let the caller re-poll
+        # instead of generating anything.
+        if content.status == "failed" and content.remediation_source_attempt_id is not None:
+            # Self-heal instead of leaving the learner permanently stuck on a
+            # transient failure: re-dispatch the same row (remediate_chapter
+            # only treats "ready" as a true no-op, so this is safe to repeat
+            # on every reopen) and report "generating" so the caller re-polls.
+            remediate_chapter_task.delay(  # pyright: ignore[reportFunctionMemberAccess]
+                content.chapter_id, user_id, content.remediation_target_tags or [],
+                content.remediation_source_attempt_id,
+            )
+        yield {"type": "generating"}
         yield {"type": "done"}
         return
 

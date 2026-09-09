@@ -7,6 +7,14 @@ streaming resume: one graded attempt triggers at most one new ChapterContent
 version, and a redelivered task adopts the row a prior run already created
 instead of minting a duplicate version.
 
+A "failed" row IS retried (unlike a plain redelivery of an already-"ready"
+row, which is a genuine no-op): `app.agents.chapter_content.generate`'s
+live route re-dispatches this task whenever a learner reopens a chapter
+whose resolved version is "failed", so a transient failure (LLM hiccup,
+worker restart mid-run) self-heals on the learner's next visit instead of
+leaving them permanently stuck — the per-order idempotent section loop below
+already makes that safe: it only (re)generates orders not yet persisted.
+
 No diagram generation for remediation sections in V1 (documented cut, not an
 oversight): any diagram_spec generate_chapter_section returns is deliberately
 dropped, never persisted or dispatched to render_diagram_task.
@@ -69,8 +77,9 @@ def remediate_chapter(
     chapter_id: int, user_id: int, weak_concept_tags: list[str], source_attempt_id: int, db: Session,
 ) -> None:
     content = _get_or_create_content(chapter_id, user_id, source_attempt_id, weak_concept_tags, db)
-    if content.status in ("ready", "failed"):
-        return  # already done (redelivery) or already failed — no retry-resume for remediation in V1
+    if content.status == "ready":
+        return  # already done — a redelivered/re-dispatched task is a no-op
+    content.error = None  # clear a prior failure's message before retrying
 
     chapter = db.get(Chapter, chapter_id)
     if chapter is None:

@@ -88,6 +88,39 @@ def get_module(db: Session, course: Course, module_id: int) -> Module:
     return module
 
 
+def get_next_chapter_id(db: Session, chapter_id: int) -> int | None:
+    """Chapter immediately after `chapter_id` in course learning order: the
+    next chapter in the same module by `Chapter.order`, else the first
+    chapter of the next module by `Module.order`. None if `chapter_id` is
+    the course's last chapter (or doesn't resolve)."""
+    chapter = db.get(Chapter, chapter_id)
+    if chapter is None:
+        return None
+    module = db.get(Module, chapter.module_id)
+    if module is None:
+        return None
+    next_in_module = db.scalar(
+        select(Chapter)
+        .where(Chapter.module_id == module.id, Chapter.order > chapter.order)
+        .order_by(Chapter.order)
+        .limit(1)
+    )
+    if next_in_module is not None:
+        return next_in_module.id
+    next_module = db.scalar(
+        select(Module)
+        .where(Module.course_id == module.course_id, Module.order > module.order)
+        .order_by(Module.order)
+        .limit(1)
+    )
+    if next_module is None:
+        return None
+    first_chapter = db.scalar(
+        select(Chapter).where(Chapter.module_id == next_module.id).order_by(Chapter.order).limit(1)
+    )
+    return first_chapter.id if first_chapter is not None else None
+
+
 def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobResponse:
     # Canonicalize + embed ONCE, and dedup on the canonical embedding so
     # semantically-similar-but-differently-worded topics collide correctly.

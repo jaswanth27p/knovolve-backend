@@ -44,7 +44,7 @@ def test_generates_all_sections_and_dispatches_diagram_task():
          patch("app.agents.chapter_content.generate.generate_chapter_section", side_effect=section_responses), \
          patch("app.agents.chapter_content.generate.render_diagram_task") as mock_diagram_task, \
          patch("app.agents.chapter_content.generate.generate_chapter_assignment_task") as mock_assignment_task:
-        events = list(stream_chapter_content(chapter, db))
+        events = list(stream_chapter_content(chapter, db, user_id=1))
 
     section_events = [e for e in events if e["type"] == "section_ready"]
     assert len(section_events) == 2
@@ -74,7 +74,7 @@ def test_ready_content_replays_without_any_llm_calls():
     with SessionLocal() as db, \
          patch("app.agents.chapter_content.generate.generate_section_outline") as mock_outline, \
          patch("app.agents.chapter_content.generate.generate_chapter_section") as mock_section:
-        events = list(stream_chapter_content(chapter, db))
+        events = list(stream_chapter_content(chapter, db, user_id=1))
 
     mock_outline.assert_not_called()
     mock_section.assert_not_called()
@@ -108,7 +108,7 @@ def test_resumes_reuses_persisted_outline_and_skips_done_sections():
          patch("app.agents.chapter_content.generate.generate_section_outline") as mock_outline, \
          patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=second_section) as mock_section, \
          patch("app.agents.chapter_content.generate.generate_chapter_assignment_task") as mock_assignment_task:
-        events = list(stream_chapter_content(chapter, db))
+        events = list(stream_chapter_content(chapter, db, user_id=1))
 
     mock_outline.assert_not_called()  # outline was already persisted, must not be regenerated
     mock_section.assert_called_once()  # only the missing section (H2) is generated
@@ -126,7 +126,7 @@ def test_generation_failure_marks_content_failed_and_yields_error():
     with SessionLocal() as db, \
          patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline), \
          patch("app.agents.chapter_content.generate.generate_chapter_section", side_effect=RuntimeError("llm down")):
-        events = list(stream_chapter_content(chapter, db))
+        events = list(stream_chapter_content(chapter, db, user_id=1))
 
     assert events[-1]["type"] == "error"
     with SessionLocal() as db:
@@ -151,6 +151,6 @@ def test_replaying_already_ready_content_does_not_redispatch_assignment():
 
     with SessionLocal() as db, \
          patch("app.agents.chapter_content.generate.generate_chapter_assignment_task") as mock_assignment_task:
-        list(stream_chapter_content(chapter, db))
+        list(stream_chapter_content(chapter, db, user_id=1))
 
     mock_assignment_task.delay.assert_not_called()

@@ -8,6 +8,7 @@ from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUser
 from app.models.chapter_content import ChapterContent
 from app.models.course import Chapter, Course, Module
 from app.schemas.assignment import AssignmentQuestionResponse, AssignmentResponse
+from app.services.progression import _resolve_relevant_content
 from app.tasks.assignment_tasks import (
     generate_chapter_assignment_task,
     generate_module_assignment_task,
@@ -15,17 +16,20 @@ from app.tasks.assignment_tasks import (
 )
 
 
-def _chapter_assignment(db: Session, chapter_content_id: int) -> Assignment | None:
-    """The global chapter assignment for this content, if any. Filtered on
-    level+scope the same way `_get_or_create_assignment` filters: the schema
-    allows a per-user row on the same chapter_content_id, and an unfiltered
-    single-row fetch would then be free to hand one learner another's
-    assignment. Scope stays hardcoded to "global" — V1 only generates those."""
+def _chapter_assignment(db: Session, content: ChapterContent) -> Assignment | None:
+    """The chapter assignment tied to `content` — whichever version
+    (`get_chapter_assignment` resolves this first, so it may be the shared
+    global v1 or this learner's own v2+ remediation) — if any. Filtered on
+    level+scope+user the same way `_get_or_create_assignment` filters: the
+    schema allows a per-user row on the same chapter_content_id, and an
+    unfiltered single-row fetch would then be free to hand one learner
+    another's assignment."""
     return db.scalar(
         select(Assignment).where(
             Assignment.level == "chapter",
-            Assignment.scope == "global",
-            Assignment.chapter_content_id == chapter_content_id,
+            Assignment.scope == content.scope,
+            Assignment.chapter_content_id == content.id,
+            *([Assignment.user_id == content.user_id] if content.scope == "user" else []),
         )
     )
 
@@ -102,22 +106,25 @@ def assignment_belongs_to_course(db: Session, assignment: Assignment, course_id:
     return module is not None and module.course_id == course_id
 
 
-def get_chapter_assignment(db: Session, chapter: Chapter) -> AssignmentResponse:
-    """Fetch-or-dispatch the global assignment for `chapter`'s ready content.
-    404s if the chapter's content isn't ready yet (nothing to base an
-    assignment on); otherwise returns the existing assignment, dispatches
-    generation and re-fetches if missing/failed, or reports "generating" if
-    the dispatched task hasn't produced a row yet."""
-    content = db.scalar(
-        select(ChapterContent).where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global")
-    )
+def get_chapter_assignment(db: Session, chapter: Chapter, user_id: int) -> AssignmentResponse:
+    """Fetch-or-dispatch the assignment for whichever chapter-content version
+    is currently relevant to `user_id` — their own latest v2+ remediation if
+    one exists, else the shared global v1 (same precedence as
+    `progression._resolve_relevant_content`, and as the content-streaming
+    route: a learner sent to review a narrow v2 must get ITS assignment, not
+    the original full one, or the remediation loop never closes). 404s if
+    that content isn't ready yet (nothing to base an assignment on);
+    otherwise returns the existing assignment, dispatches generation and
+    re-fetches if missing/failed, or reports "generating" if the dispatched
+    task hasn't produced a row yet."""
+    content = _resolve_relevant_content(db, chapter.id, user_id)
     if content is None or content.status != "ready":
         raise HTTPException(status_code=404, detail="chapter content not ready")
 
-    assignment = _chapter_assignment(db, content.id)
+    assignment = _chapter_assignment(db, content)
     if assignment is None or assignment.status == "failed":
         generate_chapter_assignment_task.delay(content.id)  # pyright: ignore[reportFunctionMemberAccess]
-        assignment = _chapter_assignment(db, content.id)
+        assignment = _chapter_assignment(db, content)
     if assignment is None:
         return AssignmentResponse(status="generating")
     return _serialize_assignment(assignment, db)

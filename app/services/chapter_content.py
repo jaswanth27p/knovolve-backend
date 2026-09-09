@@ -90,10 +90,10 @@ def _tail_pending_diagrams(db: Session, chapter_content_id: int,
         yield event
 
 
-def stream_content_events(chapter: Chapter, db: Session) -> Iterator[dict]:
+def stream_content_events(chapter: Chapter, db: Session, user_id: int) -> Iterator[dict]:
     pending_orders: set[int] = set()
     terminal: dict | None = None
-    for event in stream_chapter_content(chapter, db):
+    for event in stream_chapter_content(chapter, db, user_id):
         if event["type"] in ("done", "error"):
             # Hold the terminal event until after any pending-diagram tail so
             # the stream emits exactly one terminal ("done"|"error").

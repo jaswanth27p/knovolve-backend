@@ -6,8 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.assignment import AssignmentQuestion
+from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAnswer, AssignmentAttempt
+from app.models.chapter_content import ChapterContent
 from app.models.course import Course
 from app.schemas.attempt import (
     AnswerResult,
@@ -16,7 +17,8 @@ from app.schemas.attempt import (
     ConceptScore,
     SubmitAttemptRequest,
 )
-from app.services import assignments
+from app.services import assignments, courses
+from app.services.progression import PASS_THRESHOLD
 from app.tasks.evaluation_tasks import grade_assignment_attempt_task
 
 
@@ -63,7 +65,8 @@ def submit_attempt(db: Session, user_id: int, course: Course, assignment_id: int
     return AttemptSubmitResponse(attempt_id=attempt.id, status="grading")
 
 
-def _serialize_attempt(attempt: AssignmentAttempt, db: Session, user_id: int) -> AttemptResponse:
+def _serialize_attempt(attempt: AssignmentAttempt, assignment: Assignment, db: Session,
+                       user_id: int) -> AttemptResponse:
     """`user_id` scopes the concept-score breakdown to questions this exact
     user owns (base questions plus their own module topup, never another
     learner's) — safe because every caller has already verified
@@ -84,6 +87,17 @@ def _serialize_attempt(attempt: AssignmentAttempt, db: Session, user_id: int) ->
         totals[1] += 1
         if a.is_correct:
             totals[0] += 1
+
+    passed = attempt.overall_score is not None and attempt.overall_score >= PASS_THRESHOLD
+    chapter_id: int | None = None
+    next_chapter_id: int | None = None
+    if assignment.level == "chapter" and assignment.chapter_content_id is not None:
+        content = db.get(ChapterContent, assignment.chapter_content_id)
+        if content is not None:
+            chapter_id = content.chapter_id
+            if passed:
+                next_chapter_id = courses.get_next_chapter_id(db, chapter_id)
+
     return AttemptResponse(
         status="graded",
         overall_score=attempt.overall_score,
@@ -94,6 +108,10 @@ def _serialize_attempt(attempt: AssignmentAttempt, db: Session, user_id: int) ->
         concept_scores=[
             ConceptScore(concept_tag=tag, correct=c, total=t) for tag, (c, t) in concept_totals.items()
         ],
+        level=assignment.level,
+        passed=passed,
+        chapter_id=chapter_id,
+        next_chapter_id=next_chapter_id,
     )
 
 
@@ -108,4 +126,4 @@ def get_attempt(db: Session, user_id: int, course: Course, assignment_id: int,
     attempt = db.get(AssignmentAttempt, attempt_id)
     if attempt is None or attempt.assignment_id != assignment.id or attempt.user_id != user_id:
         raise HTTPException(status_code=404, detail="attempt not found")
-    return _serialize_attempt(attempt, db, user_id)
+    return _serialize_attempt(attempt, assignment, db, user_id)

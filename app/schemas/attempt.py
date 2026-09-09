@@ -33,3 +33,8 @@ class AttemptResponse(BaseModel):
     answers: list[AnswerResult] | None = None
     concept_scores: list[ConceptScore] | None = None
     error: str | None = None
+    # Navigation hints for the results UI, set only once status == "graded".
+    level: str | None = None  # "chapter" | "module"
+    passed: bool | None = None  # overall_score >= progression.PASS_THRESHOLD
+    chapter_id: int | None = None  # set when level == "chapter"
+    next_chapter_id: int | None = None  # set when level == "chapter" and passed
