@@ -17,5 +17,6 @@ class AssignmentQuestionResponse(BaseModel):
 
 class AssignmentResponse(BaseModel):
     status: str
+    id: int | None = None
     questions: list[AssignmentQuestionResponse] | None = None
     error: str | None = None

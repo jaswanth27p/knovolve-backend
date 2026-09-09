@@ -86,6 +86,9 @@ def test_get_assignment_dispatches_when_missing_then_returns_ready():
     # the answer key never goes over the wire to the learner
     assert "correct_answer" not in question and "explanation" not in question
     mock_task.delay.assert_called_once_with(content_id)
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(chapter_content_id=content_id).one()
+        assert body["id"] == assignment.id
 
 
 def test_get_assignment_returns_generating_when_task_has_not_run_yet():

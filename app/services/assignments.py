@@ -61,6 +61,7 @@ def _serialize_assignment(assignment: Assignment, db: Session, user_id: int | No
     ).all()
     return AssignmentResponse(
         status="ready",
+        id=assignment.id,
         questions=[
             AssignmentQuestionResponse(
                 id=q.id, order=q.order, type=q.type, text=q.text, options=q.options,
