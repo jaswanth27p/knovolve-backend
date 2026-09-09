@@ -374,19 +374,62 @@ def _reactivate_topup_if_retryable(db: Session, topup: AssignmentUserTopup) -> b
     # A prior failed/crashed run may have left this user's topup questions
     # behind. A retry regenerates the whole topup set, so clear them rather
     # than interleaving fresh questions with stale ones (and colliding on the
-    # unique order index).
-    db.execute(
-        delete(AssignmentQuestion).where(
-            AssignmentQuestion.assignment_id == topup.assignment_id,
-            AssignmentQuestion.user_id == topup.user_id,
+    # unique order index). This delete can itself fail (e.g. a learner already
+    # submitted an attempt whose assignment_answers.question_id FKs one of
+    # these rows) — the CAS above already flipped the row to "generating", so
+    # an uncaught failure here would strand it there forever. Mirror
+    # generate_module_topup's own except block: mark the row "failed" instead.
+    try:
+        db.execute(
+            delete(AssignmentQuestion).where(
+                AssignmentQuestion.assignment_id == topup.assignment_id,
+                AssignmentQuestion.user_id == topup.user_id,
+            )
         )
-    )
-    db.commit()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        topup.status = "failed"
+        topup.error = str(exc)
+        topup.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return False
     db.refresh(topup)
     return True
 
 
 TOPUP_QUESTION_COUNT = 4  # deliberate fixed count, not derived from len(weak_tags) — see design note
+
+
+def _insert_topup_questions(db: Session, assignment_id: int, user_id: int, drafts: Sequence[Any]) -> None:
+    """Insert `drafts` as AssignmentQuestion rows continuing from the shared
+    assignment's current max order, retrying once on an order collision.
+
+    Two learners' topups can generate concurrently against the same shared
+    module assignment and both read the same max_order before either
+    commits; the loser's insert then raises IntegrityError on
+    `ix_assignment_questions_unique_order` (unique on (assignment_id, order),
+    with no user_id in it). A single retry re-reads max_order fresh and
+    re-inserts with new order values — sufficient for this scale; a full
+    retry loop/backoff would be over-engineering for V1."""
+    for attempt in range(2):
+        max_order = db.scalar(
+            select(func.max(AssignmentQuestion.order)).where(AssignmentQuestion.assignment_id == assignment_id)
+        ) or 0
+        for i, draft in enumerate(drafts, start=1):
+            db.add(AssignmentQuestion(
+                assignment_id=assignment_id, user_id=user_id, order=max_order + i,
+                type=draft.type, text=draft.text, options=draft.options,
+                correct_answer=draft.correct_answer, explanation=draft.explanation,
+                concept_tag=draft.concept_tag, difficulty=draft.difficulty, source_section_id=None,
+            ))
+        try:
+            db.commit()
+            return
+        except IntegrityError:
+            db.rollback()
+            if attempt == 1:
+                raise
 
 
 def generate_module_topup(assignment_id: int, user_id: int, db: Session) -> None:
@@ -398,12 +441,19 @@ def generate_module_topup(assignment_id: int, user_id: int, db: Session) -> None
     if not created and not _reactivate_topup_if_retryable(db, topup):
         return  # already ready/skipped, a healthy run is in flight, or we lost the race
 
-    assignment = db.get(Assignment, assignment_id)
-    assert assignment is not None and assignment.module_id is not None
-    module = db.get(Module, assignment.module_id)
-    assert module is not None
-
     try:
+        # Lookups (and their failure handling) live inside the try block, not
+        # above it: an assignment/module that vanished out from under a
+        # retried run must mark the topup "failed", not strand it in
+        # "generating" via an uncaught exception (plain `assert` is also
+        # stripped under `python -O`, so it's not a safe guard here either).
+        assignment = db.get(Assignment, assignment_id)
+        if assignment is None or assignment.module_id is None:
+            raise ValueError(f"Assignment {assignment_id} not found or not a module assignment")
+        module = db.get(Module, assignment.module_id)
+        if module is None:
+            raise ValueError(f"Module {assignment.module_id} not found")
+
         weak_tags = mastery.get_weak_concept_tags(db, user_id, module.course_id)
         if not weak_tags:
             topup.status = "skipped"
@@ -428,16 +478,7 @@ def generate_module_topup(assignment_id: int, user_id: int, db: Session) -> None
             module.title, module.objective, all_sections, sorted(weak_tags), TOPUP_QUESTION_COUNT,
         )
 
-        max_order = db.scalar(
-            select(func.max(AssignmentQuestion.order)).where(AssignmentQuestion.assignment_id == assignment_id)
-        ) or 0
-        for i, draft in enumerate(drafts, start=1):
-            db.add(AssignmentQuestion(
-                assignment_id=assignment_id, user_id=user_id, order=max_order + i,
-                type=draft.type, text=draft.text, options=draft.options,
-                correct_answer=draft.correct_answer, explanation=draft.explanation,
-                concept_tag=draft.concept_tag, difficulty=draft.difficulty, source_section_id=None,
-            ))
+        _insert_topup_questions(db, assignment_id, user_id, drafts)
         topup.status = "ready"
         topup.updated_at = datetime.now(timezone.utc)
         db.commit()

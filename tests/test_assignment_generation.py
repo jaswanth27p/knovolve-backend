@@ -572,3 +572,132 @@ def test_generate_module_topup_non_colliding_order_across_users():
         orders = [q.order for q in db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).all()]
         assert len(orders) == 3 + TOPUP_QUESTION_COUNT * 2
         assert len(set(orders)) == len(orders)  # every order value unique, base + both users
+
+
+# --- final-review fix wave: I2, M1, M2 ---------------------------------------
+
+from app.agents.assignment.generate import _insert_topup_questions, _reactivate_topup_if_retryable
+from app.models.attempt import AssignmentAttempt, AssignmentAnswer
+
+
+def test_insert_topup_questions_retries_once_on_order_collision():
+    """Two learners' topups generating concurrently on the same shared module
+    assignment can both read the same max_order before either commits;
+    `ix_assignment_questions_unique_order` (unique on (assignment_id, order),
+    no user_id in it) then rejects the loser's insert. The insert-and-commit
+    step must retry once with a freshly re-read max_order rather than
+    immediately failing the topup."""
+    assignment_id, _course_id = _make_module_assignment_with_weak_chapter("topup-e", weak=True)
+    user_id = _make_user("topup-e@example.com")
+    drafts = [_draft(f"weak-tag-{i}") for i in range(TOPUP_QUESTION_COUNT)]
+
+    def _insert_colliding_row():
+        with SessionLocal() as other:
+            other.add(AssignmentQuestion(
+                assignment_id=assignment_id, order=1, type="mcq", text="colliding",
+                options=["a", "b"], correct_answer="a", explanation="e",
+                concept_tag="collider", difficulty="easy",
+            ))
+            other.commit()
+
+    with SessionLocal() as db:
+        real_scalar = db.scalar
+        calls: list[int] = []
+
+        def racing_scalar(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                # Read the stale max_order (0, nothing exists yet) BEFORE the
+                # concurrent insert lands, then let the other transaction's
+                # row land — simulating the race window between our SELECT
+                # and our (about-to-fail) INSERT.
+                result = real_scalar(*args, **kwargs)
+                _insert_colliding_row()
+                return result
+            return real_scalar(*args, **kwargs)
+
+        with patch.object(db, "scalar", side_effect=racing_scalar):
+            _insert_topup_questions(db, assignment_id, user_id, drafts)
+
+    with SessionLocal() as db:
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id, user_id=user_id).all()
+        assert len(questions) == TOPUP_QUESTION_COUNT  # the retry succeeded, nothing lost
+        orders = [q.order for q in db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).all()]
+        assert len(set(orders)) == len(orders)  # no collision survives
+
+
+def test_reactivate_topup_marks_failed_when_cleanup_delete_fails():
+    """A retried topup's cleanup delete of its own prior-run question rows can
+    itself fail — e.g. a learner already submitted an attempt whose
+    assignment_answers row FKs one of those question ids (assignment_answers
+    has no ON DELETE CASCADE from assignment_questions). The CAS already
+    flipped the row to "generating" before the delete runs; an uncaught
+    failure there must not strand it — it must land as "failed" with an
+    error recorded, mirroring generate_module_topup's own except block."""
+    assignment_id, _course_id = _make_module_assignment_with_weak_chapter("topup-f", weak=True)
+    user_id = _make_user("topup-f@example.com")
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        question = AssignmentQuestion(
+            assignment_id=assignment_id, order=1, type="mcq", text="q", options=["a", "b"],
+            correct_answer="a", explanation="e", concept_tag="t", difficulty="easy", user_id=user_id,
+        )
+        db.add(question)
+        db.commit()
+        attempt = AssignmentAttempt(assignment_id=assignment_id, user_id=user_id, status="graded",
+                                    overall_score=1.0, created_at=now, updated_at=now)
+        db.add(attempt)
+        db.commit()
+        db.add(AssignmentAnswer(attempt_id=attempt.id, question_id=question.id, concept_tag="t",
+                                user_answer="a", is_correct=True))
+        db.commit()
+        topup = AssignmentUserTopup(assignment_id=assignment_id, user_id=user_id, status="failed",
+                                    error="prior failure", created_at=now, updated_at=now)
+        db.add(topup)
+        db.commit()
+        topup_id = topup.id
+
+    with SessionLocal() as db:
+        topup = db.get(AssignmentUserTopup, topup_id)
+        assert topup is not None
+        result = _reactivate_topup_if_retryable(db, topup)
+
+    assert result is False  # the caller does not own generation — cleanup failed
+    with SessionLocal() as db:
+        topup = db.get(AssignmentUserTopup, topup_id)
+        assert topup is not None
+        assert topup.status == "failed"
+        assert topup.error is not None
+
+
+def test_generate_module_topup_marks_failed_when_assignment_has_no_module():
+    """M2: the assignment/module lookup used to sit outside the try/except as
+    bare `assert`s — stripped under `python -O`, and even when not stripped,
+    an AssertionError there would crash past the except block and strand the
+    topup row in "generating". The lookup must live inside the try block and
+    fail as a normal, caught exception. Uses a real (FK-valid) but
+    chapter-level assignment — `assignment.module_id is None` — as the
+    "lookup fails" trigger, since assignment_user_topups.assignment_id is
+    itself FK-constrained and can't point at a genuinely nonexistent row."""
+    content_id = _make_ready_chapter_content("asg-gen-m2", section_count=1)
+    assignment_id = _add_assignment(status="ready", level="chapter", chapter_content_id=content_id)
+    user_id = _make_user("asg-gen-m2@example.com")
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        # "failed" (not "generating") so _reactivate_topup_if_retryable
+        # actually claims the row and generate_module_topup proceeds into
+        # the lookup, rather than seeing a healthy run already in flight.
+        topup = AssignmentUserTopup(assignment_id=assignment_id, user_id=user_id, status="failed",
+                                    error="prior failure", created_at=now, updated_at=now)
+        db.add(topup)
+        db.commit()
+        topup_id = topup.id
+
+    with SessionLocal() as db:
+        generate_module_topup(assignment_id, user_id, db)
+
+    with SessionLocal() as db:
+        topup = db.get(AssignmentUserTopup, topup_id)
+        assert topup is not None
+        assert topup.status == "failed"
+        assert topup.error is not None

@@ -79,7 +79,7 @@ def create_module_assignment(slug: str, module_id: int, response: Response,
                               db: Session = Depends(get_session), user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     module = courses.get_module(db, course, module_id)
-    result = assignments.create_module_assignment(db, module)
+    result = assignments.create_module_assignment(db, module, user.id)
     if result.status == "ready":
         response.status_code = 200
     return result

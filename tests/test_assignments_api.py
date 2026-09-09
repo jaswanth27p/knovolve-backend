@@ -7,6 +7,8 @@ from app.models.course import Course, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 from app.models.user import User
+from app.agents.assignment.generate import generate_module_topup, TOPUP_QUESTION_COUNT
+from app.agents.assignment.nodes.generate_section_questions import QuestionDraft
 
 client = TestClient(app)
 
@@ -215,7 +217,94 @@ def _make_ready_module_assignment(slug: str) -> tuple[int, int, int]:
         return module.id, assignment.id, question.id
 
 
+def _make_ready_module_assignment_with_weak_chapter(slug: str) -> tuple[int, int, int]:
+    """Like `_make_ready_module_assignment`, but the module's one chapter
+    carries `remediation_target_tags` and no learner has a passing attempt
+    for it, so `mastery.get_weak_concept_tags` returns a non-empty set for
+    any user on this course — lets a topup dispatch reach the LLM-call
+    branch instead of short-circuiting to "skipped". Returns (module_id,
+    assignment_id, base_question_id)."""
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        chapter = Chapter(module_id=module.id, title="C", objective="o", order=1)
+        db.add(chapter)
+        db.commit()
+        content = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
+                                  outline=[], remediation_target_tags=["weak-tag"],
+                                  created_at=now, updated_at=now)
+        db.add(content)
+        db.commit()
+        db.add(ChapterContentSection(chapter_content_id=content.id, order=0, heading="H", kind="teaching",
+                                    body_markdown="body", examples=[{"prompt": "p", "walkthrough": "w"}]))
+        db.commit()
+        assignment = Assignment(level="module", module_id=module.id, scope="global", status="ready",
+                                created_at=now, updated_at=now)
+        db.add(assignment)
+        db.commit()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="base q",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag="base", difficulty="easy")
+        db.add(question)
+        db.commit()
+        return module.id, assignment.id, question.id
+
+
+def _make_ready_module_assignment_with_chapters(slug: str) -> tuple[int, int, int]:
+    """Like `_make_ready_module_assignment` but with one ready chapter under
+    the module, so `create_module_assignment` (POST)'s always-on chapter
+    readiness gate (409 if not all chapters have ready content) doesn't
+    trip before the topup logic these tests exercise is even reached —
+    unlike `get_module_assignment`, which only gates on readiness when a
+    dispatch is actually needed. Returns (module_id, assignment_id,
+    base_question_id)."""
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        chapter = Chapter(module_id=module.id, title="C", objective="o", order=1)
+        db.add(chapter)
+        db.commit()
+        content = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
+                                  outline=[], created_at=now, updated_at=now)
+        db.add(content)
+        db.commit()
+        assignment = Assignment(level="module", module_id=module.id, scope="global", status="ready",
+                                created_at=now, updated_at=now)
+        db.add(assignment)
+        db.commit()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="base q",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag="base", difficulty="easy")
+        db.add(question)
+        db.commit()
+        return module.id, assignment.id, question.id
+
+
+def _weak_draft(tag: str) -> QuestionDraft:
+    return QuestionDraft(type="mcq", text=f"q-{tag}", options=["a", "b"], correct_answer="a",
+                        explanation="e", concept_tag=tag, difficulty="easy")
+
+
 def test_get_module_assignment_dispatches_topup_once_per_user():
+    """C1 regression: the route must NOT pre-create the AssignmentUserTopup
+    row before dispatching — a prior version did, which made every real
+    `generate_module_topup` run see `created=False` and a fresh
+    status="generating", conclude a healthy run was already in flight, and
+    no-op forever (a permanent stranded row, the feature silently doing
+    nothing in production). The mock here has no side effect, so if the
+    route were still creating the row itself, a topup row WOULD exist after
+    this fetch even though nothing actually ran it — asserting no row exists
+    yet is exactly what would have caught that regression."""
     headers = _auth_headers("asg-api-topup-a@example.com")
     slug = "asg-api-topup-a"
     module_id, assignment_id, _ = _make_ready_module_assignment(slug)
@@ -229,16 +318,155 @@ def test_get_module_assignment_dispatches_topup_once_per_user():
     mock_task.delay.assert_called_once_with(assignment_id, user_id)
 
     with SessionLocal() as db:
+        # The task is mocked with no side effect (never actually runs), so
+        # the route dispatching it must not itself have created the row —
+        # row creation belongs entirely to generate.py's own get-or-create.
         topups = db.query(AssignmentUserTopup).filter_by(assignment_id=assignment_id, user_id=user_id).all()
-        assert len(topups) == 1
-        assert topups[0].status == "generating"
+        assert len(topups) == 0
 
-    # A second fetch by the SAME user must not dispatch again — the topup row
-    # already exists.
+    # A second fetch by the SAME user, with the (real, unmocked) task's
+    # get-or-create actually running this time, creates exactly one row and
+    # dispatches exactly once.
+    def _fake_generate(a_id, u_id):
+        with SessionLocal() as db:
+            generate_module_topup(a_id, u_id, db)
+
     with patch("app.services.assignments.generate_module_topup_task") as mock_task_2:
+        mock_task_2.delay.side_effect = _fake_generate
         resp2 = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
     assert resp2.status_code == 200
-    mock_task_2.delay.assert_not_called()
+    mock_task_2.delay.assert_called_once_with(assignment_id, user_id)
+    with SessionLocal() as db:
+        topups = db.query(AssignmentUserTopup).filter_by(assignment_id=assignment_id, user_id=user_id).all()
+        assert len(topups) == 1
+        assert topups[0].status == "skipped"  # no chapters/weak concepts set up for this module
+
+    # A third fetch must not dispatch again — the (now "skipped", terminal)
+    # topup row already exists.
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task_3:
+        resp3 = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
+    assert resp3.status_code == 200
+    mock_task_3.delay.assert_not_called()
+
+
+def test_get_module_assignment_topup_dispatch_actually_generates_and_reaches_ready():
+    """C1: the test class the final review said was missing — every existing
+    test stopped at a mock boundary (asserting `.delay` was called) that hid
+    the no-op bug. This test drives BOTH the route's dispatch decision AND
+    the actual task body (`generate_module_topup`) together, mocking only
+    the LLM call, and asserts the topup genuinely reaches "ready" with its
+    questions persisted and visible in the response — not stranded at
+    "generating"."""
+    headers = _auth_headers("asg-api-topup-c1@example.com")
+    slug = "asg-api-topup-c1"
+    module_id, assignment_id, base_qid = _make_ready_module_assignment_with_weak_chapter(slug)
+    with SessionLocal() as db:
+        user_id = db.query(User).filter_by(email="asg-api-topup-c1@example.com").one().id
+
+    drafts = [_weak_draft(f"weak-{i}") for i in range(TOPUP_QUESTION_COUNT)]
+
+    def _run_real_task(a_id, u_id):
+        with SessionLocal() as db:
+            with patch("app.agents.assignment.generate.generate_weak_concept_questions", return_value=drafts):
+                generate_module_topup(a_id, u_id, db)
+
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task:
+        mock_task.delay.side_effect = _run_real_task
+        resp = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    question_ids = {q["id"] for q in body["questions"]}
+    assert base_qid in question_ids
+    assert len(question_ids) == 1 + TOPUP_QUESTION_COUNT  # base + all generated topup questions
+
+    with SessionLocal() as db:
+        topup = db.query(AssignmentUserTopup).filter_by(assignment_id=assignment_id, user_id=user_id).one()
+        assert topup.status == "ready"  # not stranded at "generating"
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id, user_id=user_id).all()
+        assert len(questions) == TOPUP_QUESTION_COUNT
+
+
+def test_get_module_assignment_redispatches_a_failed_topup():
+    """I1: a "failed" topup must be re-dispatched on a subsequent fetch,
+    mirroring the `assignment is None or assignment.status == "failed"`
+    convention already used for the base assignment."""
+    headers = _auth_headers("asg-api-topup-i1@example.com")
+    slug = "asg-api-topup-i1"
+    module_id, assignment_id, _ = _make_ready_module_assignment(slug)
+    with SessionLocal() as db:
+        user_id = db.query(User).filter_by(email="asg-api-topup-i1@example.com").one().id
+        now = datetime.now(timezone.utc)
+        db.add(AssignmentUserTopup(assignment_id=assignment_id, user_id=user_id, status="failed",
+                                   error="prior failure", created_at=now, updated_at=now))
+        db.commit()
+
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task:
+        resp = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
+
+    assert resp.status_code == 200
+    mock_task.delay.assert_called_once_with(assignment_id, user_id)
+
+
+def test_post_module_assignment_redispatches_a_failed_topup():
+    """I1, POST path."""
+    headers = _auth_headers("asg-api-topup-i1-post@example.com")
+    slug = "asg-api-topup-i1-post"
+    module_id, assignment_id, _ = _make_ready_module_assignment_with_chapters(slug)
+    with SessionLocal() as db:
+        user_id = db.query(User).filter_by(email="asg-api-topup-i1-post@example.com").one().id
+        now = datetime.now(timezone.utc)
+        db.add(AssignmentUserTopup(assignment_id=assignment_id, user_id=user_id, status="failed",
+                                   error="prior failure", created_at=now, updated_at=now))
+        db.commit()
+
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task:
+        resp = client.post(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
+
+    assert resp.status_code == 200
+    mock_task.delay.assert_called_once_with(assignment_id, user_id)
+
+
+def test_post_module_assignment_does_not_leak_other_learners_topup_questions():
+    """C2 regression: `create_module_assignment` (POST) used to call
+    `_serialize_assignment(assignment, db)` with no `user_id` at all — every
+    learner got every OTHER learner's topup questions, and the returned set
+    didn't match what `submit_attempt` would accept for that learner."""
+    slug = "asg-api-topup-c2"
+    module_id, assignment_id, base_qid = _make_ready_module_assignment_with_chapters(slug)
+
+    owner_headers = _auth_headers("asg-api-topup-c2-owner@example.com")
+    other_headers = _auth_headers("asg-api-topup-c2-other@example.com")
+    with SessionLocal() as db:
+        owner_id = db.query(User).filter_by(email="asg-api-topup-c2-owner@example.com").one().id
+        now = datetime.now(timezone.utc)
+        db.add(AssignmentUserTopup(assignment_id=assignment_id, user_id=owner_id, status="ready",
+                                   created_at=now, updated_at=now))
+        db.commit()
+        topup_q = AssignmentQuestion(assignment_id=assignment_id, order=1, type="mcq", text="owner topup q",
+                                     options=["a", "b"], correct_answer="a", explanation="e",
+                                     concept_tag="owner-topup", difficulty="easy", user_id=owner_id)
+        db.add(topup_q)
+        db.commit()
+        topup_qid = topup_q.id
+
+    # A DIFFERENT learner POSTing to the same module assignment must see only
+    # the shared base question — never the owner's topup question.
+    with patch("app.services.assignments.generate_module_topup_task"):
+        other_resp = client.post(f"/courses/{slug}/modules/{module_id}/assignment", headers=other_headers)
+    assert other_resp.status_code == 200
+    other_question_ids = {q["id"] for q in other_resp.json()["questions"]}
+    assert other_question_ids == {base_qid}
+    assert topup_qid not in other_question_ids
+
+    # The owner's own POST must include their own topup (not the leaked
+    # every-learner set the pre-fix version returned).
+    with patch("app.services.assignments.generate_module_topup_task"):
+        owner_resp = client.post(f"/courses/{slug}/modules/{module_id}/assignment", headers=owner_headers)
+    assert owner_resp.status_code == 200
+    owner_question_ids = {q["id"] for q in owner_resp.json()["questions"]}
+    assert owner_question_ids == {base_qid, topup_qid}
 
 
 def test_get_module_assignment_includes_only_own_ready_topup_questions():

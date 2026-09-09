@@ -1,7 +1,5 @@
 """Assignment fetch-or-dispatch service: chapter/module assignment lookup,
 generation dispatch, and course-scoped assignment resolution for attempts."""
-from datetime import datetime, timezone
-
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -124,9 +122,42 @@ def get_chapter_assignment(db: Session, chapter: Chapter) -> AssignmentResponse:
     return _serialize_assignment(assignment, db)
 
 
-def create_module_assignment(db: Session, module: Module) -> AssignmentResponse:
+def _ensure_topup_dispatched(db: Session, assignment: Assignment, user_id: int) -> None:
+    """Check-and-dispatch `user_id`'s topup generation for `assignment`
+    (already known "ready"). Deliberately does NOT create the
+    `AssignmentUserTopup` row itself — a plain `select`, no insert. Row
+    creation belongs entirely to `generate.py`'s own
+    `_get_or_create_topup`/`_reactivate_topup_if_retryable`, which already
+    handle the concurrent-insert race (`IntegrityError` catch-and-reselect)
+    and the CAS needed to tell a healthy in-flight run apart from a stale
+    one. A previous version of this function pre-created the row itself
+    before dispatching: the task then saw `created=False` and a fresh
+    `status="generating"`/`updated_at`, concluded a healthy run was already
+    in flight, and no-opped forever — stranding the row and making topup
+    generation a permanent no-op in production. Dispatch whenever no row
+    exists yet, or the previous run failed — mirroring the `assignment is
+    None or assignment.status == "failed"` convention used for the base
+    assignment two functions above."""
+    topup = db.scalar(
+        select(AssignmentUserTopup).where(
+            AssignmentUserTopup.assignment_id == assignment.id, AssignmentUserTopup.user_id == user_id,
+        )
+    )
+    if topup is None or topup.status == "failed":
+        generate_module_topup_task.delay(assignment.id, user_id)  # pyright: ignore[reportFunctionMemberAccess]
+
+
+def create_module_assignment(db: Session, module: Module, user_id: int) -> AssignmentResponse:
     """Fetch-or-dispatch the global assignment for `module`. 409s if any of
-    the module's chapters lack ready content."""
+    the module's chapters lack ready content.
+
+    Also ensures `user_id`'s own topup exists (dispatch-only, see
+    `_ensure_topup_dispatched`) and serializes with `user_id` so this
+    endpoint agrees with `get_module_assignment` on what "this learner's
+    assignment" contains. A previous version called `_serialize_assignment`
+    with no `user_id` at all, which leaked every learner's topup questions to
+    every other learner AND returned a question set `submit_attempt` would
+    then reject as not matching this learner's own assignment."""
     if not _module_chapters_ready(module, db):
         raise HTTPException(status_code=409, detail="not all chapters in this module have ready content")
 
@@ -136,7 +167,11 @@ def create_module_assignment(db: Session, module: Module) -> AssignmentResponse:
         assignment = _module_assignment(db, module.id)
     if assignment is None:
         return AssignmentResponse(status="generating")
-    return _serialize_assignment(assignment, db)
+
+    if assignment.status == "ready":
+        _ensure_topup_dispatched(db, assignment, user_id)
+
+    return _serialize_assignment(assignment, db, user_id=user_id)
 
 
 def get_module_assignment(db: Session, module: Module, user_id: int) -> AssignmentResponse:
@@ -145,12 +180,12 @@ def get_module_assignment(db: Session, module: Module, user_id: int) -> Assignme
     a dispatch is actually needed (no existing/failed assignment found).
 
     Once the base assignment is "ready", also ensures `user_id`'s own topup
-    exists (dispatching generation fire-and-forget on first fetch) and
-    includes their topup questions once ready. This is deliberately
-    invisible at the AssignmentResponse.status level in V1 — the base
-    assignment being "ready" is what `status` has always meant here; a topup
-    landing later doesn't change it, and there's no polling signal today for
-    "new questions just landed" (that's a future UI, not built here)."""
+    exists (dispatch-only, see `_ensure_topup_dispatched`) and includes their
+    topup questions once ready. This is deliberately invisible at the
+    AssignmentResponse.status level in V1 — the base assignment being "ready"
+    is what `status` has always meant here; a topup landing later doesn't
+    change it, and there's no polling signal today for "new questions just
+    landed" (that's a future UI, not built here)."""
     assignment = _module_assignment(db, module.id)
     if assignment is None or assignment.status == "failed":
         if not _module_chapters_ready(module, db):
@@ -161,18 +196,7 @@ def get_module_assignment(db: Session, module: Module, user_id: int) -> Assignme
         return AssignmentResponse(status="generating")
 
     if assignment.status == "ready":
-        topup = db.scalar(
-            select(AssignmentUserTopup).where(
-                AssignmentUserTopup.assignment_id == assignment.id, AssignmentUserTopup.user_id == user_id,
-            )
-        )
-        if topup is None:
-            now = datetime.now(timezone.utc)
-            db.add(AssignmentUserTopup(
-                assignment_id=assignment.id, user_id=user_id, status="generating", created_at=now, updated_at=now,
-            ))
-            db.commit()
-            generate_module_topup_task.delay(assignment.id, user_id)  # pyright: ignore[reportFunctionMemberAccess]
+        _ensure_topup_dispatched(db, assignment, user_id)
 
     return _serialize_assignment(assignment, db, user_id=user_id)
 
