@@ -5,7 +5,8 @@ from app.main import app
 from app.db import SessionLocal
 from app.models.course import Course, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
-from app.models.assignment import Assignment, AssignmentQuestion
+from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
+from app.models.user import User
 
 client = TestClient(app)
 
@@ -187,3 +188,92 @@ def test_get_module_assignment_409_when_a_chapter_not_ready_and_nothing_generate
     _, module_id = _make_module_via_api("asg-api-mod-d", chapter_count=1, all_ready=False)
     resp = client.get(f"/courses/asg-api-mod-d/modules/{module_id}/assignment", headers=headers)
     assert resp.status_code == 409
+
+
+def _make_ready_module_assignment(slug: str) -> tuple[int, int, int]:
+    """Returns (module_id, assignment_id, base_question_id) for an
+    already-"ready" module-level global assignment with one base question
+    (user_id=None) — no chapters needed since these tests exercise the
+    already-ready branch of get_module_assignment directly."""
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        assignment = Assignment(level="module", module_id=module.id, scope="global", status="ready",
+                                created_at=now, updated_at=now)
+        db.add(assignment)
+        db.commit()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="base q",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag="base", difficulty="easy")
+        db.add(question)
+        db.commit()
+        return module.id, assignment.id, question.id
+
+
+def test_get_module_assignment_dispatches_topup_once_per_user():
+    headers = _auth_headers("asg-api-topup-a@example.com")
+    slug = "asg-api-topup-a"
+    module_id, assignment_id, _ = _make_ready_module_assignment(slug)
+    with SessionLocal() as db:
+        user_id = db.query(User).filter_by(email="asg-api-topup-a@example.com").one().id
+
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task:
+        resp = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ready"
+    mock_task.delay.assert_called_once_with(assignment_id, user_id)
+
+    with SessionLocal() as db:
+        topups = db.query(AssignmentUserTopup).filter_by(assignment_id=assignment_id, user_id=user_id).all()
+        assert len(topups) == 1
+        assert topups[0].status == "generating"
+
+    # A second fetch by the SAME user must not dispatch again — the topup row
+    # already exists.
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task_2:
+        resp2 = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=headers)
+    assert resp2.status_code == 200
+    mock_task_2.delay.assert_not_called()
+
+
+def test_get_module_assignment_includes_only_own_ready_topup_questions():
+    slug = "asg-api-topup-b"
+    module_id, assignment_id, base_qid = _make_ready_module_assignment(slug)
+
+    owner_headers = _auth_headers("asg-api-topup-b-owner@example.com")
+    other_headers = _auth_headers("asg-api-topup-b-other@example.com")
+    with SessionLocal() as db:
+        owner_id = db.query(User).filter_by(email="asg-api-topup-b-owner@example.com").one().id
+        now = datetime.now(timezone.utc)
+        db.add(AssignmentUserTopup(assignment_id=assignment_id, user_id=owner_id, status="ready",
+                                   created_at=now, updated_at=now))
+        db.commit()
+        topup_q = AssignmentQuestion(assignment_id=assignment_id, order=1, type="mcq", text="owner topup q",
+                                     options=["a", "b"], correct_answer="a", explanation="e",
+                                     concept_tag="owner-topup", difficulty="easy", user_id=owner_id)
+        db.add(topup_q)
+        db.commit()
+        topup_qid = topup_q.id
+
+    # The owner's topup already exists and is "ready" — no dispatch expected.
+    with patch("app.services.assignments.generate_module_topup_task") as mock_task:
+        resp = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=owner_headers)
+    assert resp.status_code == 200
+    mock_task.delay.assert_not_called()
+    owner_question_ids = {q["id"] for q in resp.json()["questions"]}
+    assert owner_question_ids == {base_qid, topup_qid}
+
+    # A DIFFERENT user fetching the same module assignment must not see the
+    # owner's topup question (their own topup dispatch is fire-and-forget and
+    # not ready yet, so only the shared base question shows).
+    with patch("app.services.assignments.generate_module_topup_task"):
+        other_resp = client.get(f"/courses/{slug}/modules/{module_id}/assignment", headers=other_headers)
+    assert other_resp.status_code == 200
+    other_question_ids = {q["id"] for q in other_resp.json()["questions"]}
+    assert other_question_ids == {base_qid}
+    assert topup_qid not in other_question_ids

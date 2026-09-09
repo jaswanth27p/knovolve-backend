@@ -269,6 +269,134 @@ def test_get_attempt_failed_status_does_not_auto_retry():
     mock_task_on_get.delay.assert_not_called()  # unlike the assignment GET routes, no auto-retry
 
 
+def _make_ready_module_assignment(slug: str) -> tuple[str, int, int]:
+    """Returns (course_slug, assignment_id, base_question_id) for a ready
+    module-level global assignment with a single shared base question
+    (user_id=None)."""
+    with SessionLocal() as db:
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=_now())
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        assignment = Assignment(level="module", module_id=module.id, scope="global",
+                                status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.commit()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="base q",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag="base", difficulty="easy")
+        db.add(question)
+        db.commit()
+        return course.topic_slug, assignment.id, question.id
+
+
+def _add_topup_question(assignment_id: int, user_id: int, order: int, concept_tag: str) -> int:
+    with SessionLocal() as db:
+        q = AssignmentQuestion(assignment_id=assignment_id, order=order, type="mcq", text=f"topup q{order}",
+                                options=["a", "b"], correct_answer="a", explanation="e",
+                                concept_tag=concept_tag, difficulty="easy", user_id=user_id)
+        db.add(q)
+        db.commit()
+        return q.id
+
+
+def test_submit_module_attempt_ignores_other_users_topup_question():
+    """Regression test for the leak Part 3 fixes: seeding ANOTHER learner's
+    topup question on the same shared module assignment_id must not force
+    this learner's submission to account for it. Before the fix, the
+    unfiltered question fetch in submit_attempt would require the other
+    user's question id too, and this submission (covering only base + the
+    submitter's own questions) would 400."""
+    slug, assignment_id, base_qid = _make_ready_module_assignment("att-api-topup-leak")
+    submit_headers = _auth_headers("att-api-topup-leak-submitter@example.com")
+    other_headers = _auth_headers("att-api-topup-leak-other@example.com")
+    with SessionLocal() as db:
+        submitter_id = db.query(User).filter_by(email="att-api-topup-leak-submitter@example.com").one().id
+        other_id = db.query(User).filter_by(email="att-api-topup-leak-other@example.com").one().id
+
+    own_qid = _add_topup_question(assignment_id, submitter_id, order=1, concept_tag="own")
+    # Seeded BEFORE the submit — this other user's topup question already
+    # lives on the shared assignment_id when the submitter posts.
+    _add_topup_question(assignment_id, other_id, order=2, concept_tag="other-only")
+
+    with patch("app.services.attempts.grade_assignment_attempt_task"):
+        resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [
+                {"question_id": base_qid, "answer": "a"},
+                {"question_id": own_qid, "answer": "a"},
+            ]},
+            headers=submit_headers,
+        )
+
+    assert resp.status_code == 202
+    attempt_id = resp.json()["attempt_id"]
+    with SessionLocal() as db:
+        answers = db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all()
+        assert {a.question_id for a in answers} == {base_qid, own_qid}
+
+
+def test_get_attempt_concept_scores_excludes_other_users_topup_concept():
+    """`_serialize_attempt`/`get_attempt`'s concept_scores must never include
+    a concept tag that only exists on another learner's topup question."""
+    slug, assignment_id, base_qid = _make_ready_module_assignment("att-api-topup-concepts")
+    submit_headers = _auth_headers("att-api-topup-concepts-submitter@example.com")
+    _auth_headers("att-api-topup-concepts-other@example.com")
+    with SessionLocal() as db:
+        submitter_id = db.query(User).filter_by(email="att-api-topup-concepts-submitter@example.com").one().id
+        other_id = db.query(User).filter_by(email="att-api-topup-concepts-other@example.com").one().id
+
+    own_qid = _add_topup_question(assignment_id, submitter_id, order=1, concept_tag="own-concept")
+    other_qid = _add_topup_question(assignment_id, other_id, order=2, concept_tag="other-only-concept")
+
+    def _fake_grade(attempt_id):
+        with SessionLocal() as db:
+            attempt = db.get(AssignmentAttempt, attempt_id)
+            assert attempt is not None
+            for a in db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all():
+                a.is_correct = True
+                a.feedback = "Correct."
+                a.graded_at = _now()
+            attempt.status = "graded"
+            attempt.overall_score = 1.0
+            db.commit()
+
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task:
+        mock_task.delay.side_effect = _fake_grade
+        submit_resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [
+                {"question_id": base_qid, "answer": "a"},
+                {"question_id": own_qid, "answer": "a"},
+            ]},
+            headers=submit_headers,
+        )
+    attempt_id = submit_resp.json()["attempt_id"]
+
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=submit_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "graded"
+    tags = {c["concept_tag"] for c in body["concept_scores"]}
+    assert tags == {"base", "own-concept"}
+    assert "other-only-concept" not in tags
+
+    # Defense-in-depth: even if an AssignmentAnswer row referencing another
+    # user's topup question somehow ends up attached to this attempt (which
+    # submit_attempt's own filter above already prevents), _serialize_attempt's
+    # user-scoped join must still exclude it from concept_scores.
+    with SessionLocal() as db:
+        db.add(AssignmentAnswer(attempt_id=attempt_id, question_id=other_qid, concept_tag="other-only-concept",
+                                user_answer="a", is_correct=True, feedback="ok", graded_at=_now()))
+        db.commit()
+
+    resp2 = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=submit_headers)
+    tags2 = {c["concept_tag"] for c in resp2.json()["concept_scores"]}
+    assert "other-only-concept" not in tags2
+
+
 def test_get_attempt_404_for_another_users_attempt():
     slug, assignment_id, question_ids = _make_ready_assignment("att-api-i", question_count=1)
     owner_headers = _auth_headers("att-api-i-owner@example.com")

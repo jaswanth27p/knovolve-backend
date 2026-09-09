@@ -36,7 +36,10 @@ def submit_attempt(db: Session, user_id: int, course: Course, assignment_id: int
         raise HTTPException(status_code=404, detail="assignment not found")
 
     questions = db.scalars(
-        select(AssignmentQuestion).where(AssignmentQuestion.assignment_id == assignment.id)
+        select(AssignmentQuestion).where(
+            AssignmentQuestion.assignment_id == assignment.id,
+            (AssignmentQuestion.user_id.is_(None)) | (AssignmentQuestion.user_id == user_id),
+        )
     ).all()
     questions_by_id = {q.id: q for q in questions}
     submitted_ids = {a.question_id for a in body.answers}
@@ -60,11 +63,20 @@ def submit_attempt(db: Session, user_id: int, course: Course, assignment_id: int
     return AttemptSubmitResponse(attempt_id=attempt.id, status="grading")
 
 
-def _serialize_attempt(attempt: AssignmentAttempt, db: Session) -> AttemptResponse:
+def _serialize_attempt(attempt: AssignmentAttempt, db: Session, user_id: int) -> AttemptResponse:
+    """`user_id` scopes the concept-score breakdown to questions this exact
+    user owns (base questions plus their own module topup, never another
+    learner's) — safe because every caller has already verified
+    `attempt.user_id == user_id` before calling this."""
     if attempt.status != "graded":
         return AttemptResponse(status=attempt.status, error=attempt.error)
     answers = db.scalars(
-        select(AssignmentAnswer).where(AssignmentAnswer.attempt_id == attempt.id)
+        select(AssignmentAnswer)
+        .join(AssignmentQuestion, AssignmentQuestion.id == AssignmentAnswer.question_id)
+        .where(
+            AssignmentAnswer.attempt_id == attempt.id,
+            (AssignmentQuestion.user_id.is_(None)) | (AssignmentQuestion.user_id == user_id),
+        )
     ).all()
     concept_totals: dict[str, list[int]] = {}
     for a in answers:
@@ -96,4 +108,4 @@ def get_attempt(db: Session, user_id: int, course: Course, assignment_id: int,
     attempt = db.get(AssignmentAttempt, attempt_id)
     if attempt is None or attempt.assignment_id != assignment.id or attempt.user_id != user_id:
         raise HTTPException(status_code=404, detail="attempt not found")
-    return _serialize_attempt(attempt, db)
+    return _serialize_attempt(attempt, db, user_id)

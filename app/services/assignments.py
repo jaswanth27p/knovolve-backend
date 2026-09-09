@@ -1,14 +1,20 @@
 """Assignment fetch-or-dispatch service: chapter/module assignment lookup,
 generation dispatch, and course-scoped assignment resolution for attempts."""
+from datetime import datetime, timezone
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.assignment import Assignment, AssignmentQuestion
+from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 from app.models.chapter_content import ChapterContent
 from app.models.course import Chapter, Course, Module
 from app.schemas.assignment import AssignmentQuestionResponse, AssignmentResponse
-from app.tasks.assignment_tasks import generate_chapter_assignment_task, generate_module_assignment_task
+from app.tasks.assignment_tasks import (
+    generate_chapter_assignment_task,
+    generate_module_assignment_task,
+    generate_module_topup_task,
+)
 
 
 def _chapter_assignment(db: Session, chapter_content_id: int) -> Assignment | None:
@@ -38,12 +44,21 @@ def _module_assignment(db: Session, module_id: int) -> Assignment | None:
     )
 
 
-def _serialize_assignment(assignment: Assignment, db: Session) -> AssignmentResponse:
+def _serialize_assignment(assignment: Assignment, db: Session, user_id: int | None = None) -> AssignmentResponse:
+    """`user_id` is only ever passed by the module-assignment fetch path (to
+    include that learner's own topup questions alongside the shared base
+    set); the chapter-assignment path always calls this with the default
+    `None`, since chapter-level AssignmentQuestion rows never get a user_id
+    (Task 2 only ever writes user_id on module-level topup rows) and adding
+    the OR-filter there would be a no-op at best."""
     if assignment.status != "ready":
         return AssignmentResponse(status=assignment.status, error=assignment.error)
+    filters = [AssignmentQuestion.assignment_id == assignment.id]
+    if user_id is not None:
+        filters.append((AssignmentQuestion.user_id.is_(None)) | (AssignmentQuestion.user_id == user_id))
     questions = db.scalars(
         select(AssignmentQuestion)
-        .where(AssignmentQuestion.assignment_id == assignment.id)
+        .where(*filters)
         .order_by(AssignmentQuestion.order)
     ).all()
     return AssignmentResponse(
@@ -124,10 +139,18 @@ def create_module_assignment(db: Session, module: Module) -> AssignmentResponse:
     return _serialize_assignment(assignment, db)
 
 
-def get_module_assignment(db: Session, module: Module) -> AssignmentResponse:
+def get_module_assignment(db: Session, module: Module, user_id: int) -> AssignmentResponse:
     """Fetch-or-dispatch the global assignment for `module`, same as
     `create_module_assignment` but only gates on chapter readiness (409) when
-    a dispatch is actually needed (no existing/failed assignment found)."""
+    a dispatch is actually needed (no existing/failed assignment found).
+
+    Once the base assignment is "ready", also ensures `user_id`'s own topup
+    exists (dispatching generation fire-and-forget on first fetch) and
+    includes their topup questions once ready. This is deliberately
+    invisible at the AssignmentResponse.status level in V1 — the base
+    assignment being "ready" is what `status` has always meant here; a topup
+    landing later doesn't change it, and there's no polling signal today for
+    "new questions just landed" (that's a future UI, not built here)."""
     assignment = _module_assignment(db, module.id)
     if assignment is None or assignment.status == "failed":
         if not _module_chapters_ready(module, db):
@@ -136,7 +159,22 @@ def get_module_assignment(db: Session, module: Module) -> AssignmentResponse:
         assignment = _module_assignment(db, module.id)
     if assignment is None:
         return AssignmentResponse(status="generating")
-    return _serialize_assignment(assignment, db)
+
+    if assignment.status == "ready":
+        topup = db.scalar(
+            select(AssignmentUserTopup).where(
+                AssignmentUserTopup.assignment_id == assignment.id, AssignmentUserTopup.user_id == user_id,
+            )
+        )
+        if topup is None:
+            now = datetime.now(timezone.utc)
+            db.add(AssignmentUserTopup(
+                assignment_id=assignment.id, user_id=user_id, status="generating", created_at=now, updated_at=now,
+            ))
+            db.commit()
+            generate_module_topup_task.delay(assignment.id, user_id)  # pyright: ignore[reportFunctionMemberAccess]
+
+    return _serialize_assignment(assignment, db, user_id=user_id)
 
 
 def get_assignment_for_course(db: Session, assignment_id: int, course: Course) -> Assignment:

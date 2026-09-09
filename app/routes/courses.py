@@ -90,7 +90,7 @@ def get_module_assignment(slug: str, module_id: int, db: Session = Depends(get_s
                            user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     module = courses.get_module(db, course, module_id)
-    return assignments.get_module_assignment(db, module)
+    return assignments.get_module_assignment(db, module, user.id)
 
 
 @router.post("/{slug}/assignments/{assignment_id}/attempts", response_model=AttemptSubmitResponse, status_code=202)
