@@ -2,10 +2,13 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from app.main import app
 from app.db import SessionLocal
-from app.models.course import Course, Module, Chapter
+from app.models.course import Course, Module, Chapter, Concept
 from app.models.enrollment import UserCourse
 from app.models.chapter_content import ChapterContent
+from app.models.assignment import Assignment
+from app.models.attempt import AssignmentAttempt
 from app.models.user import User
+from app.services import streaks
 
 client = TestClient(app)
 
@@ -138,6 +141,59 @@ def test_me_dashboard_counts():
     assert body["in_progress_count"] == 2
     assert body["completed_count"] == 0
     assert body["total_count"] == 2
+
+
+def test_dashboard_includes_streak_and_mastery_counts():
+    headers = _auth_for("me-i@example.com")
+    user_id = _get_user_id("me-i@example.com")
+
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug="me-i-1", topic_raw="me-i-1", topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course); db.flush()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module); db.flush()
+        weak_chapter = Chapter(module_id=module.id, title="Weak", objective="o", order=1)
+        db.add(weak_chapter); db.flush()
+        weak_content = ChapterContent(chapter_id=weak_chapter.id, version=1, scope="global", status="ready",
+                                       outline=[], remediation_target_tags=["weak-tag"],
+                                       created_at=now, updated_at=now)
+        db.add(weak_content); db.flush()
+        weak_assignment = Assignment(level="chapter", chapter_content_id=weak_content.id, scope="global",
+                                      status="ready", created_at=now, updated_at=now)
+        db.add(weak_assignment); db.flush()
+        db.add(Concept(course_id=course.id, name="weak-tag", chapter_id=weak_chapter.id))
+
+        strong_chapter = Chapter(module_id=module.id, title="Strong", objective="o", order=2)
+        db.add(strong_chapter); db.flush()
+        strong_content = ChapterContent(chapter_id=strong_chapter.id, version=1, scope="global", status="ready",
+                                         outline=[], created_at=now, updated_at=now)
+        db.add(strong_content); db.flush()
+        strong_assignment = Assignment(level="chapter", chapter_content_id=strong_content.id, scope="global",
+                                        status="ready", created_at=now, updated_at=now)
+        db.add(strong_assignment); db.flush()
+        db.add(Concept(course_id=course.id, name="strong-tag", chapter_id=strong_chapter.id))
+        db.flush()
+
+        db.add(AssignmentAttempt(assignment_id=weak_assignment.id, user_id=user_id, status="graded",
+                                  overall_score=0.2, created_at=now, updated_at=now))
+        db.add(AssignmentAttempt(assignment_id=strong_assignment.id, user_id=user_id, status="graded",
+                                  overall_score=0.9, created_at=now, updated_at=now))
+        db.add(UserCourse(user_id=user_id, course_id=course.id, enrolled_at=now, last_opened_at=now))
+        db.commit()
+        course_id = course.id
+
+    with SessionLocal() as db:
+        streaks.record_activity(db, user_id, datetime.now(timezone.utc))
+        db.commit()
+
+    resp = client.get("/me/dashboard", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["streak"]["current"] == 1
+    row = next(r for r in body["in_progress"] if r["id"] == course_id)
+    assert row["weak_concept_count"] == 1
+    assert row["strong_concept_count"] == 1
 
 
 def test_delete_me_course_un_tracks_only():

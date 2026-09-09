@@ -23,6 +23,13 @@ class TrackedCourseResponse(BaseModel):
     module_count: int
     chapter_count: int
     content_ready: bool
+    weak_concept_count: int
+    strong_concept_count: int
+
+
+class StreakResponse(BaseModel):
+    current: int
+    longest: int
 
 
 class DashboardResponse(BaseModel):
@@ -31,6 +38,7 @@ class DashboardResponse(BaseModel):
     in_progress_count: int
     completed_count: int
     total_count: int
+    streak: StreakResponse
 
 
 class PublicCourseResponse(BaseModel):

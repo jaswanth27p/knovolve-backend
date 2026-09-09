@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 from app.models.chapter_content import ChapterContent
 from app.models.course import Course, Module, Chapter
 from app.models.enrollment import UserCourse
-from app.schemas.course import DashboardResponse, TrackedCourseResponse
+from app.models.learner_streak import LearnerStreak
+from app.schemas.course import DashboardResponse, StreakResponse, TrackedCourseResponse
+from app.services import mastery
 
 
 def _serialize_tracked(db: Session, uc: UserCourse) -> TrackedCourseResponse:
@@ -25,11 +27,14 @@ def _serialize_tracked(db: Session, uc: UserCourse) -> TrackedCourseResponse:
             ChapterContent.status == "ready",
         ).count()
     content_ready = len(chapter_ids) > 0 and ready_rows == len(chapter_ids)
+    statuses = mastery.get_concept_statuses(db, uc.user_id, course.id).values()
     return TrackedCourseResponse(
         id=course.id, topic_slug=course.topic_slug, topic_raw=course.topic_raw,
         status=uc.status, progress=uc.progress, last_opened_at=uc.last_opened_at,
         module_count=len(modules), chapter_count=len(chapter_ids),
         content_ready=content_ready,
+        weak_concept_count=sum(1 for s in statuses if s == "weak"),
+        strong_concept_count=sum(1 for s in statuses if s == "strong"),
     )
 
 
@@ -42,10 +47,15 @@ def get_dashboard(db: Session, user_id: int) -> DashboardResponse:
     rows = db.query(UserCourse).filter_by(user_id=user_id).order_by(UserCourse.last_opened_at.desc()).all()
     in_progress = [_serialize_tracked(db, uc) for uc in rows if uc.status == "in_progress"]
     completed = [_serialize_tracked(db, uc) for uc in rows if uc.status == "completed"]
+    streak = db.query(LearnerStreak).filter_by(user_id=user_id).first()
     return DashboardResponse(
         in_progress=in_progress, completed=completed,
         in_progress_count=len(in_progress), completed_count=len(completed),
         total_count=len(rows),
+        streak=StreakResponse(
+            current=streak.current_streak if streak else 0,
+            longest=streak.longest_streak if streak else 0,
+        ),
     )
 
 
