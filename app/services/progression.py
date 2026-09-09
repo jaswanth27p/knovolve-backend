@@ -54,16 +54,37 @@ def _latest_attempt_score(db: Session, assignment_id: int, user_id: int) -> floa
     return attempt.overall_score if attempt is not None else None
 
 
-def _chapter_passed(db: Session, chapter_id: int, user_id: int) -> bool:
-    content = db.scalar(
+def _resolve_relevant_content(db: Session, chapter_id: int, user_id: int) -> ChapterContent | None:
+    """Which ChapterContent version currently applies to this user for this
+    chapter: their own latest scope="user" remediation version if one
+    exists, else the chapter's scope="global" version."""
+    user_content = db.scalar(
+        select(ChapterContent)
+        .where(
+            ChapterContent.chapter_id == chapter_id,
+            ChapterContent.scope == "user",
+            ChapterContent.user_id == user_id,
+        )
+        .order_by(ChapterContent.version.desc())
+        .limit(1)
+    )
+    if user_content is not None:
+        return user_content
+    return db.scalar(
         select(ChapterContent).where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "global")
     )
+
+
+def _chapter_passed(db: Session, chapter_id: int, user_id: int) -> bool:
+    content = _resolve_relevant_content(db, chapter_id, user_id)
     if content is None:
         return False
     assignment = db.scalar(
         select(Assignment).where(
-            Assignment.level == "chapter", Assignment.scope == "global",
+            Assignment.level == "chapter",
+            Assignment.scope == content.scope,
             Assignment.chapter_content_id == content.id,
+            *([Assignment.user_id == user_id] if content.scope == "user" else []),
         )
     )
     if assignment is None:

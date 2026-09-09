@@ -107,3 +107,36 @@ def test_uses_latest_attempt_per_chapter_not_best():
     with SessionLocal() as db:
         uc = db.query(UserCourse).filter_by(user_id=user_id, course_id=course_id).one()
         assert uc.progress == 0.0
+
+
+def test_chapter_passed_uses_users_latest_user_scoped_version_not_global():
+    with SessionLocal() as db:
+        course, chapters = _make_course_with_chapters(db, "prog-d", 1)
+        chapter, global_assignment = chapters[0]
+        user = User(email="prog-d@example.com", password_hash="x")
+        db.add(user); db.flush()
+        db.add(UserCourse(user_id=user.id, course_id=course.id, status="in_progress", progress=0.0,
+                           enrolled_at=_now(), last_opened_at=_now()))
+        # Global V1 attempt: failed.
+        db.add(AssignmentAttempt(assignment_id=global_assignment.id, user_id=user.id, status="graded",
+                                  overall_score=0.1, created_at=_now(), updated_at=_now()))
+        db.flush()
+        # A V2 remediation version + its own user-scoped assignment.
+        v2_content = ChapterContent(chapter_id=chapter.id, version=2, scope="user", user_id=user.id,
+                                     status="ready", outline=[], created_at=_now(), updated_at=_now())
+        db.add(v2_content); db.flush()
+        v2_assignment = Assignment(level="chapter", chapter_content_id=v2_content.id, scope="user",
+                                    user_id=user.id, status="ready", created_at=_now(), updated_at=_now())
+        db.add(v2_assignment); db.flush()
+        # V2 attempt: passed.
+        db.add(AssignmentAttempt(assignment_id=v2_assignment.id, user_id=user.id, status="graded",
+                                  overall_score=0.95, created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id, course_id = user.id, course.id
+
+    with SessionLocal() as db:
+        progression.update_course_progress(db, user_id, course_id)
+    with SessionLocal() as db:
+        uc = db.query(UserCourse).filter_by(user_id=user_id, course_id=course_id).one()
+        assert uc.progress == 1.0
+        assert uc.status == "completed"
