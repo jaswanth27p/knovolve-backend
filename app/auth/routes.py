@@ -1,6 +1,7 @@
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import cast
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import CursorResult, select, update
@@ -60,12 +61,23 @@ def _clear_auth_cookies(response: Response) -> None:
 
 
 def _issue_tokens(db: Session, user: User, response: Response) -> None:
+    now = datetime.now(timezone.utc)
     raw_refresh = create_refresh_token()
     db.add(RefreshToken(
         user_id=user.id,
         token_hash=hash_token(raw_refresh),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_ttl_days),
-        created_at=datetime.now(timezone.utc),
+        expires_at=now + timedelta(days=settings.jwt_refresh_ttl_days),
+        created_at=now,
+        # A fresh login/registration is a brand-new session: its birth clock
+        # starts now. Rotations later inherit this, so the whole chain shares
+        # one session_started_at and force_relogin_after_days is measured from
+        # the login, not from each individual refresh.
+        session_started_at=now,
+        # A new login/registration mints its own unique chain identity,
+        # inherited by every rotation in the chain. Reuse detection and the
+        # forced-relogin cap revoke by this ID, so only this login is killed —
+        # a different login of the same user (another device) survives.
+        chain_id=str(uuid4()),
     ))
     db.commit()
     _set_auth_cookies(response, create_access_token(user.id), raw_refresh)
@@ -112,13 +124,15 @@ def login(body: LoginRequest, response: Response, db: Session = Depends(get_sess
     return AuthResponse()
 
 
-def _revoke_active_chain(db: Session, user_id: int) -> None:
-    """Revoke every currently-active refresh token for this user. Called when
-    reuse of an already-claimed/revoked token is detected, since at that point
-    we can no longer tell which token in the chain is the legitimate one."""
+def _revoke_chain(db: Session, chain_id: str) -> None:
+    """Revoke every currently-active refresh token in one login chain (identified
+    by chain_id). Called when reuse of an already-claimed/revoked token is
+    detected, since at that point we can no longer tell which token in the chain
+    is the legitimate one. Scoped to the chain, not the user: a separate login
+    of the same user (e.g. another device) has its own chain_id and survives."""
     db.execute(
         update(RefreshToken)
-        .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+        .where(RefreshToken.chain_id == chain_id, RefreshToken.revoked_at.is_(None))
         .values(revoked_at=datetime.now(timezone.utc))
     )
     db.commit()
@@ -169,14 +183,14 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_sess
         # concurrent race - by the time we got the row lock, theirs had
         # already committed), or this is a genuine reuse of an
         # already-revoked token (whether or not it has also expired since).
-        # Either way, treat it as reuse: revoke the user's whole active
-        # chain - we can no longer tell which branch is legitimate. Because
-        # the winning claim+mint+link below is one atomic transaction gated
-        # by the same row lock, if a winner exists its new token is
-        # guaranteed to already be committed and visible by the time we get
-        # here.
+        # Either way, treat it as reuse: revoke the chain - we can no longer
+        # tell which branch is legitimate. Because the winning claim+mint+link
+        # below is one atomic transaction gated by the same row lock, if a
+        # winner exists its new token is guaranteed to already be committed and
+        # visible by the time we get here. Only this login chain is revoked; a
+        # separate login (another device) survives.
         db.rollback()
-        _revoke_active_chain(db, token.user_id)
+        _revoke_chain(db, token.chain_id)
         raise HTTPException(status_code=401, detail="refresh token reuse detected")
 
     if token.expires_at < datetime.now(timezone.utc):
@@ -188,16 +202,48 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_sess
         db.commit()
         raise HTTPException(status_code=401, detail="refresh token expired")
 
+    # Absolute session-age cap (force_relogin_after_days): the whole chain
+    # shares one birth timestamp, so an actively-used session is still forced
+    # to re-login after the cap even though each individual token's sliding
+    # expires_at keeps renewing. The presented token is already claimed
+    # (revoked) by the UPDATE above; kill the rest of the chain and clear the
+    # cookies so the client cannot keep presenting siblings past the cap.
+    if (
+        settings.force_relogin_after_days > 0
+        and datetime.now(timezone.utc) - token.session_started_at
+        >= timedelta(days=settings.force_relogin_after_days)
+    ):
+        _revoke_chain(db, token.chain_id)
+        # A raised HTTPException would drop the delete-cookie headers (FastAPI
+        # builds the error response fresh, ignoring headers set on the
+        # injected `response` object), leaving stale cookies in the browser.
+        # Return a JSONResponse with the clear-cookie headers attached to the
+        # error response itself so the client actually gets logged out.
+        from fastapi.responses import JSONResponse
+
+        error = JSONResponse(status_code=401, content={"detail": "session expired, please log in again"})
+        error.delete_cookie(ACCESS_COOKIE, path="/")
+        error.delete_cookie(REFRESH_COOKIE, path="/auth")
+        return error
+
     user = db.get(User, token.user_id)
     # token.user_id is a foreign key to users.id and there is no user-deletion
     # path in this codebase, so the referenced user is guaranteed to exist.
     assert user is not None
     new_raw_refresh = create_refresh_token()
+    now = datetime.now(timezone.utc)
     new_token_row = RefreshToken(
         user_id=user.id,
         token_hash=hash_token(new_raw_refresh),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_ttl_days),
-        created_at=datetime.now(timezone.utc),
+        expires_at=now + timedelta(days=settings.jwt_refresh_ttl_days),
+        created_at=now,
+        # Inherit the chain's session birth so the absolute cap is measured
+        # from the original login, not reset by each rotation (which would let
+        # an active session sidestep the cap forever).
+        session_started_at=token.session_started_at,
+        # Stay in the same login chain so chain-scoped revocation (reuse
+        # detection) and the forced-relogin cap apply to the whole session.
+        chain_id=token.chain_id,
     )
     db.add(new_token_row)
     # Caller is holding a row lock from the claim UPDATE above and needs the

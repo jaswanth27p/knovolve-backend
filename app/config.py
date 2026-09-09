@@ -7,6 +7,14 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_access_ttl_minutes: int = 15
     jwt_refresh_ttl_days: int = 30
+    # Hard cap on a login session's lifetime regardless of activity. A chain
+    # of rotated refresh tokens shares one session_started_at (its birth);
+    # once the chain is older than this, /auth/refresh refuses to rotate any
+    # further and the user must log in again. Without this, a continuously
+    # active user would refresh forever and never re-authenticate. Set to 0
+    # to disable. Idle users are already bounded by jwt_refresh_ttl_days on
+    # each token; this caps the active-user case.
+    force_relogin_after_days: int = 30
     # How long a revoked/expired refresh_tokens row is kept before the
     # cleanup task purges it. Kept briefly post-revoke for reuse-detection
     # forensics rather than deleted immediately.

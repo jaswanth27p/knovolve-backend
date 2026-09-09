@@ -27,6 +27,87 @@ def test_refresh_rotates_token():
     assert client.cookies.get("refresh_token") != old_refresh
 
 
+def test_rotation_inherits_session_started_at():
+    """All tokens in one rotation chain share the chain's session birth
+    timestamp — it must never drift forward on rotation, or an actively-used
+    session could outlive the force-relogin cap forever by constantly
+    re-arming its own session age."""
+    _register("chain-birth@example.com")
+    with SessionLocal() as db:
+        first = db.scalar(select(RefreshToken))
+        assert first is not None
+        birth = first.session_started_at
+
+    for _ in range(3):
+        resp = client.post("/auth/refresh", headers=CSRF_HEADERS)
+        assert resp.status_code == 200
+
+    with SessionLocal() as db:
+        tokens = db.query(RefreshToken).all()
+        assert len(tokens) == 4
+        assert all(t.session_started_at == birth for t in tokens)
+
+
+def test_refresh_rejected_when_chain_older_than_force_relogin_cap():
+    """The absolute session-age cap: a chain whose session_started_at is past
+    force_relogin_after_days must refuse to rotate — even though its sliding
+    expires_at is still valid (i.e. the user is actively using the app). The
+    whole chain is revoked and the auth cookies cleared so the browser is
+    forced to re-login."""
+    from app.config import settings
+
+    assert settings.force_relogin_after_days > 0
+    _register("force-relogin@example.com")
+    with SessionLocal() as db:
+        first = db.scalar(select(RefreshToken))
+        assert first is not None
+        user_id = first.user_id
+        # Keep the sliding TTL comfortably valid; only the absolute cap has
+        # been exceeded. This distinguishes the new cap from plain expiry.
+        first.expires_at = datetime.now(timezone.utc) + timedelta(days=10)
+        first.session_started_at = datetime.now(timezone.utc) - timedelta(
+            days=settings.force_relogin_after_days + 1
+        )
+        db.commit()
+
+    resp = client.post("/auth/refresh", headers=CSRF_HEADERS)
+    assert resp.status_code == 401
+    assert client.cookies.get("refresh_token") is None
+    assert client.cookies.get("access_token") is None
+
+    with SessionLocal() as db:
+        tokens = db.query(RefreshToken).filter(RefreshToken.user_id == user_id).all()
+        assert len(tokens) == 1
+        assert tokens[0].revoked_at is not None
+
+
+def test_new_login_starts_a_fresh_session_clock():
+    """Logging in again after the cap resets session_started_at to now, so the
+    new session gets a full force_relogin_after_days window."""
+    from app.config import settings
+
+    register_email = "new-session@example.com"
+    _register(register_email)
+    with SessionLocal() as db:
+        first = db.scalar(select(RefreshToken))
+        assert first is not None
+        first.session_started_at = datetime.now(timezone.utc) - timedelta(
+            days=settings.force_relogin_after_days + 1
+        )
+        db.commit()
+
+    # Re-login: must issue a fresh session birth, not inherit the old.
+    client.cookies.clear()
+    resp = client.post("/auth/login", json={"email": register_email, "password": "pw123456"}, headers=CSRF_HEADERS)
+    assert resp.status_code == 200
+    with SessionLocal() as db:
+        tokens = db.query(RefreshToken).all()
+        assert len(tokens) == 2
+        newest = tokens[-1]
+        age = datetime.now(timezone.utc) - newest.session_started_at
+        assert age < timedelta(minutes=1)
+
+
 def test_refresh_without_csrf_header_rejected():
     _register("csrf-refresh@example.com")
     resp = client.post("/auth/refresh")
@@ -49,6 +130,57 @@ def test_reused_refresh_token_revokes_chain():
     with SessionLocal() as db:
         all_tokens = db.query(RefreshToken).filter(RefreshToken.user_id == user_id).all()
         assert all(t.revoked_at is not None for t in all_tokens)
+
+
+def test_reuse_revokes_only_the_presented_chain_not_other_sessions():
+    """Chain-scoped revocation: two independent logins for the SAME user (e.g.
+    laptop + phone) form two separate chains. Reuse detected on chain A must
+    kill only chain A — chain B (the other device) must keep working. This is
+    the regression test for revoking by chain_id instead of by user_id."""
+    # Session A: register (chain A)
+    client.cookies.clear()
+    resp_a = client.post("/auth/register", json={"email": "multi@example.com", "password": "pw123456"}, headers=CSRF_HEADERS)
+    assert resp_a.status_code == 201
+    token_a = client.cookies.get("refresh_token")
+    assert token_a is not None
+    with SessionLocal() as db:
+        row_a = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(token_a)))
+        assert row_a is not None
+        chain_a = row_a.chain_id
+        user_id = row_a.user_id
+
+    # Session B: re-login same user (chain B)
+    client.cookies.clear()
+    resp_b = client.post("/auth/login", json={"email": "multi@example.com", "password": "pw123456"}, headers=CSRF_HEADERS)
+    assert resp_b.status_code == 200
+    token_b = client.cookies.get("refresh_token")
+    assert token_b is not None
+    with SessionLocal() as db:
+        row_b = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(token_b)))
+        assert row_b is not None
+        chain_b = row_b.chain_id
+    assert chain_a != chain_b
+
+    # Simulate reuse on chain A: rotate it (chain A token becomes revoked), then
+    # replay the stale chain-A token.
+    client.cookies.set("refresh_token", token_a)
+    first = client.post("/auth/refresh", headers=CSRF_HEADERS)
+    assert first.status_code == 200
+    client.cookies.set("refresh_token", token_a)
+    resp = client.post("/auth/refresh", headers=CSRF_HEADERS)
+    assert resp.status_code == 401
+
+    with SessionLocal() as db:
+        chain_a_tokens = db.query(RefreshToken).filter(
+            RefreshToken.chain_id == chain_a, RefreshToken.user_id == user_id
+        ).all()
+        chain_b_tokens = db.query(RefreshToken).filter(
+            RefreshToken.chain_id == chain_b, RefreshToken.user_id == user_id
+        ).all()
+        assert len(chain_a_tokens) >= 1
+        assert all(t.revoked_at is not None for t in chain_a_tokens)
+        assert len(chain_b_tokens) >= 1
+        assert all(t.revoked_at is None for t in chain_b_tokens)
 
 
 def test_logout_revokes_token():
