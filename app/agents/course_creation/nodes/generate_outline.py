@@ -21,7 +21,9 @@ def generate_outline(state: CourseCreationState) -> CourseCreationState:
     messages = GENERATE_OUTLINE_PROMPT.format_messages(topic_raw=state["topic_raw"])
     result = call_with_retry(structured.invoke, messages)
     modules = [
-        {**m.model_dump(), "chapters": []}
-        for m in (result.modules if isinstance(result, OutlineResponse) else result)
+        {**m.model_dump(), "order": idx, "chapters": []}
+        for idx, m in enumerate(
+            result.modules if isinstance(result, OutlineResponse) else result, start=1
+        )
     ]
     return {**state, "modules": modules}

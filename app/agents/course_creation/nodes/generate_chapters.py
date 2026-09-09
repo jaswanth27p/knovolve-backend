@@ -57,7 +57,9 @@ def generate_chapters(state: CourseCreationState) -> CourseCreationState:
         )
         result = call_with_retry(structured.invoke, messages)
         chapters = result.chapters if isinstance(result, ChaptersResponse) else result
-        module["chapters"] = [c.model_dump() for c in chapters]
+        module["chapters"] = [
+            {**c.model_dump(), "order": idx} for idx, c in enumerate(chapters, start=1)
+        ]
 
     return {**state, "modules": modules, "rerun_modules": []}
 
