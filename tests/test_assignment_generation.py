@@ -437,3 +437,138 @@ def test_concurrent_module_generation_recovers_from_insert_race():
         assert assignment.created_at == winner_stamp
         assert assignment.status == "generating"
         assert db.query(AssignmentQuestion).filter_by(assignment_id=assignment.id).count() == 0
+
+
+# --- per-user weak-concept topup ---------------------------------------------
+
+from app.models.user import User
+from app.models.assignment import AssignmentUserTopup
+from app.agents.assignment.generate import generate_module_topup, TOPUP_QUESTION_COUNT
+
+
+def _make_module_assignment_with_weak_chapter(slug: str, weak: bool) -> tuple[int, int]:
+    """Course with one module (whose assignment is the topup target) and one
+    chapter. When weak=True the chapter's global content carries
+    remediation_target_tags and has no passing attempt, so
+    mastery.get_weak_concept_tags returns a non-empty set for the course;
+    when weak=False the content carries no remediation tags at all, so the
+    course has zero weak concepts. Returns (module_assignment_id, course_id).
+    """
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="Module T", objective="Module O", order=1)
+        db.add(module)
+        db.commit()
+        chapter = Chapter(module_id=module.id, title="Chapter T", objective="Chapter O", order=1)
+        db.add(chapter)
+        db.commit()
+        content = ChapterContent(
+            chapter_id=chapter.id, version=1, scope="global", status="ready", outline=[],
+            remediation_target_tags=["weak-tag"] if weak else None, created_at=now, updated_at=now,
+        )
+        db.add(content)
+        db.commit()
+        db.add(ChapterContentSection(
+            chapter_content_id=content.id, order=0, heading="H", kind="teaching",
+            body_markdown="body", examples=[{"prompt": "p", "walkthrough": "w"}],
+        ))
+        db.commit()
+        module_assignment = Assignment(
+            level="module", module_id=module.id, scope="global", status="ready",
+            created_at=now, updated_at=now,
+        )
+        db.add(module_assignment)
+        db.commit()
+        return module_assignment.id, course.id
+
+
+def _make_user(email: str) -> int:
+    with SessionLocal() as db:
+        user = User(email=email, password_hash="x")
+        db.add(user)
+        db.commit()
+        return user.id
+
+
+def test_generate_module_topup_creates_questions_for_weak_learner():
+    assignment_id, _course_id = _make_module_assignment_with_weak_chapter("topup-a", weak=True)
+    user_id = _make_user("topup-a@example.com")
+    drafts = [_draft(f"weak-tag-{i}") for i in range(TOPUP_QUESTION_COUNT)]
+
+    with patch("app.agents.assignment.generate.generate_weak_concept_questions", return_value=drafts) as mock_gen:
+        with SessionLocal() as db:
+            generate_module_topup(assignment_id, user_id, db)
+
+    mock_gen.assert_called_once()
+    with SessionLocal() as db:
+        topup = db.query(AssignmentUserTopup).filter_by(assignment_id=assignment_id, user_id=user_id).one()
+        assert topup.status == "ready"
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id, user_id=user_id).all()
+        assert len(questions) == TOPUP_QUESTION_COUNT
+        assert all(q.user_id == user_id for q in questions)
+
+
+def test_generate_module_topup_skips_when_no_weak_concepts():
+    assignment_id, _course_id = _make_module_assignment_with_weak_chapter("topup-b", weak=False)
+    user_id = _make_user("topup-b@example.com")
+
+    with patch("app.agents.assignment.generate.generate_weak_concept_questions") as mock_gen:
+        with SessionLocal() as db:
+            generate_module_topup(assignment_id, user_id, db)
+
+    mock_gen.assert_not_called()
+    with SessionLocal() as db:
+        topup = db.query(AssignmentUserTopup).filter_by(assignment_id=assignment_id, user_id=user_id).one()
+        assert topup.status == "skipped"
+        assert db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id, user_id=user_id).count() == 0
+
+
+def test_generate_module_topup_idempotent_when_already_ready():
+    assignment_id, _course_id = _make_module_assignment_with_weak_chapter("topup-c", weak=True)
+    user_id = _make_user("topup-c@example.com")
+    drafts = [_draft(f"weak-tag-{i}") for i in range(TOPUP_QUESTION_COUNT)]
+
+    with patch("app.agents.assignment.generate.generate_weak_concept_questions", return_value=drafts):
+        with SessionLocal() as db:
+            generate_module_topup(assignment_id, user_id, db)
+
+    with patch("app.agents.assignment.generate.generate_weak_concept_questions") as mock_gen:
+        with SessionLocal() as db:
+            generate_module_topup(assignment_id, user_id, db)  # second call, already ready
+
+    mock_gen.assert_not_called()
+    with SessionLocal() as db:
+        questions = db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id, user_id=user_id).all()
+        assert len(questions) == TOPUP_QUESTION_COUNT
+
+
+def test_generate_module_topup_non_colliding_order_across_users():
+    assignment_id, _course_id = _make_module_assignment_with_weak_chapter("topup-d", weak=True)
+    with SessionLocal() as db:
+        for i in range(3):
+            db.add(AssignmentQuestion(
+                assignment_id=assignment_id, order=i, type="mcq", text=f"base-{i}",
+                options=["a", "b"], correct_answer="a", explanation="e",
+                concept_tag=f"base-tag-{i}", difficulty="easy",
+            ))
+        db.commit()
+    user_a_id = _make_user("topup-d-a@example.com")
+    user_b_id = _make_user("topup-d-b@example.com")
+    drafts_a = [_draft(f"a-tag-{i}") for i in range(TOPUP_QUESTION_COUNT)]
+    drafts_b = [_draft(f"b-tag-{i}") for i in range(TOPUP_QUESTION_COUNT)]
+
+    with patch("app.agents.assignment.generate.generate_weak_concept_questions", return_value=drafts_a):
+        with SessionLocal() as db:
+            generate_module_topup(assignment_id, user_a_id, db)
+
+    with patch("app.agents.assignment.generate.generate_weak_concept_questions", return_value=drafts_b):
+        with SessionLocal() as db:
+            generate_module_topup(assignment_id, user_b_id, db)
+
+    with SessionLocal() as db:
+        orders = [q.order for q in db.query(AssignmentQuestion).filter_by(assignment_id=assignment_id).all()]
+        assert len(orders) == 3 + TOPUP_QUESTION_COUNT * 2
+        assert len(set(orders)) == len(orders)  # every order value unique, base + both users

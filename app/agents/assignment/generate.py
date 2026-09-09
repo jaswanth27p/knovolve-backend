@@ -8,15 +8,17 @@ nothing slow enough mid-way to need per-step persistence.
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.models.assignment import Assignment, AssignmentQuestion
+from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter, Module
+from app.services import mastery
 from app.agents.assignment.nodes.generate_section_questions import generate_questions_for_section
 from app.agents.assignment.nodes.generate_topup_questions import generate_topup_questions
+from app.agents.assignment.nodes.generate_weak_concept_questions import generate_weak_concept_questions
 
 MIN_QUESTIONS = 3
 
@@ -291,3 +293,157 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
     except Exception as exc:
         _mark_failed(db, assignment, exc)
         return
+
+
+def _get_or_create_topup(db: Session, assignment_id: int, user_id: int) -> tuple[AssignmentUserTopup, bool]:
+    """Get-or-create against the (assignment_id, user_id) unique constraint.
+    Same shape as _get_or_create_assignment — created=False means a row
+    already existed (any status) and the caller decides what to do."""
+    filters = [AssignmentUserTopup.assignment_id == assignment_id, AssignmentUserTopup.user_id == user_id]
+    existing = db.scalar(select(AssignmentUserTopup).where(*filters))
+    if existing is not None:
+        return existing, False
+
+    now = datetime.now(timezone.utc)
+    topup = AssignmentUserTopup(
+        assignment_id=assignment_id, user_id=user_id, status="generating", created_at=now, updated_at=now,
+    )
+    db.add(topup)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent triggers for the same learner (e.g. a racing double
+        # fetch of the module assignment) can both pass the select above; the
+        # unique constraint lets exactly one insert win.
+        db.rollback()
+        winner = db.scalar(select(AssignmentUserTopup).where(*filters))
+        if winner is None:
+            raise
+        return winner, False
+    db.refresh(topup)
+    return topup, True
+
+
+def _reactivate_topup_if_retryable(db: Session, topup: AssignmentUserTopup) -> bool:
+    """Decide whether this run may (re)generate an AssignmentUserTopup row that
+    already existed, and claim it if so. Returns True when the caller owns
+    generation. Same CAS shape as _reactivate_if_retryable, scoped to
+    AssignmentUserTopup.
+
+    Retryable states are "failed" and a *stale* "generating" — the latter is a
+    run whose worker died mid-flight: `task_acks_late` gets the job redelivered,
+    but without this the redelivered run would see "generating" and no-op,
+    stranding the row (and the polling client) forever. "ready" and "skipped"
+    are BOTH terminal — a topup that already determined "nothing to add"
+    (skipped) must not be regenerated on a later fetch; that would let a
+    learner who later develops a new weak concept never get topped up again
+    after their first "skipped" result, which is an acceptable limitation for
+    V1 (no product requirement forces re-checking on every fetch), not a bug
+    to work around here.
+
+    The claim is a compare-and-swap on the exact (status, updated_at) pair this
+    run observed, so of two concurrent retries only one proceeds. Matching on
+    updated_at as well as status is what makes the stale case safe: both racers
+    observe status="generating", so status alone would let both CAS through.
+    """
+    observed_status = topup.status
+    observed_updated_at = topup.updated_at
+
+    if observed_status == "generating":
+        updated_at = observed_updated_at
+        if updated_at.tzinfo is None:  # defensive: a naive column read
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        if updated_at > datetime.now(timezone.utc) - STALE_AFTER:
+            return False  # a healthy generation is still in flight
+    elif observed_status != "failed":
+        return False  # "ready" or "skipped" — nothing to do
+
+    rows = db.execute(
+        update(AssignmentUserTopup)
+        .where(
+            AssignmentUserTopup.id == topup.id,
+            AssignmentUserTopup.status == observed_status,
+            AssignmentUserTopup.updated_at == observed_updated_at,
+        )
+        .values(status="generating", error=None, updated_at=datetime.now(timezone.utc))
+    ).rowcount
+    db.commit()
+    if rows == 0:
+        return False  # another retry won the reactivation race
+
+    # A prior failed/crashed run may have left this user's topup questions
+    # behind. A retry regenerates the whole topup set, so clear them rather
+    # than interleaving fresh questions with stale ones (and colliding on the
+    # unique order index).
+    db.execute(
+        delete(AssignmentQuestion).where(
+            AssignmentQuestion.assignment_id == topup.assignment_id,
+            AssignmentQuestion.user_id == topup.user_id,
+        )
+    )
+    db.commit()
+    db.refresh(topup)
+    return True
+
+
+TOPUP_QUESTION_COUNT = 4  # deliberate fixed count, not derived from len(weak_tags) — see design note
+
+
+def generate_module_topup(assignment_id: int, user_id: int, db: Session) -> None:
+    """Per-learner extension of a shared module assignment: adds up to
+    TOPUP_QUESTION_COUNT questions targeting THIS user's weak concepts
+    (app.services.mastery.get_weak_concept_tags). Never touches the shared
+    base question set — every row this creates has user_id=user_id."""
+    topup, created = _get_or_create_topup(db, assignment_id, user_id)
+    if not created and not _reactivate_topup_if_retryable(db, topup):
+        return  # already ready/skipped, a healthy run is in flight, or we lost the race
+
+    assignment = db.get(Assignment, assignment_id)
+    assert assignment is not None and assignment.module_id is not None
+    module = db.get(Module, assignment.module_id)
+    assert module is not None
+
+    try:
+        weak_tags = mastery.get_weak_concept_tags(db, user_id, module.course_id)
+        if not weak_tags:
+            topup.status = "skipped"
+            topup.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+
+        chapters = db.scalars(select(Chapter).where(Chapter.module_id == module.id).order_by(Chapter.order)).all()
+        all_sections: list[dict] = []
+        for chapter in chapters:
+            content = db.scalar(
+                select(ChapterContent).where(
+                    ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global",
+                )
+            )
+            if content is None or content.status != "ready":
+                continue
+            for section in _teaching_sections(db, content.id):
+                all_sections.append({"heading": section.heading, "body_markdown": section.body_markdown})
+
+        drafts = generate_weak_concept_questions(
+            module.title, module.objective, all_sections, sorted(weak_tags), TOPUP_QUESTION_COUNT,
+        )
+
+        max_order = db.scalar(
+            select(func.max(AssignmentQuestion.order)).where(AssignmentQuestion.assignment_id == assignment_id)
+        ) or 0
+        for i, draft in enumerate(drafts, start=1):
+            db.add(AssignmentQuestion(
+                assignment_id=assignment_id, user_id=user_id, order=max_order + i,
+                type=draft.type, text=draft.text, options=draft.options,
+                correct_answer=draft.correct_answer, explanation=draft.explanation,
+                concept_tag=draft.concept_tag, difficulty=draft.difficulty, source_section_id=None,
+            ))
+        topup.status = "ready"
+        topup.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        topup.status = "failed"
+        topup.error = str(exc)
+        topup.updated_at = datetime.now(timezone.utc)
+        db.commit()

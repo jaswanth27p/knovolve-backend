@@ -8,6 +8,7 @@ LLM_NODES = {
     "generate_chapter_section": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "generate_section_questions": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "generate_topup_questions": {"provider": "opencode-go", "model": "mimo-v2.5"},
+    "generate_weak_concept_questions": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "grade_assignment_answers": {"provider": "opencode-go", "model": "mimo-v2.5"},
 }
 

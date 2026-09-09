@@ -368,6 +368,39 @@ GENERATE_TOPUP_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 # ---------------------------------------------------------------------------
+# generate_weak_concept_questions.generate_weak_concept_questions
+# ---------------------------------------------------------------------------
+# Per-learner extension of a module assignment (app.agents.assignment.generate.
+# generate_module_topup): unlike GENERATE_TOPUP_QUESTIONS_PROMPT, which fills a
+# question-count shortfall with generic under-covered-topic questions, this
+# targets a SPECIFIC learner's weak concepts (app.services.mastery.
+# get_weak_concept_tags) directly — every question must trace back to one of
+# the listed concepts, not just draw from the content at large.
+GENERATE_WEAK_CONCEPT_QUESTIONS_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert assessment writer for Knovolve, an adaptive "
+            "learning platform. A specific learner has struggled with these "
+            "concepts: {concept_tags}. Write EXACTLY {count} assessment "
+            "questions drawn from the content below, each one targeting at "
+            "least one of those concepts directly — do not write generic "
+            "questions unrelated to the listed concepts. Same per-question "
+            "requirements as before: `type` (mcq/true_false/free_text), "
+            "`options` (mcq only, 2-5), `correct_answer`, `explanation`, "
+            "`concept_tag` (specific, not generic — should match or closely "
+            "relate to one of the listed concepts), `difficulty`.",
+        ),
+        (
+            "human",
+            "{title} — {objective}\n\n{sections_text}\n\n"
+            "Struggling concepts: {concept_tags}\n\n"
+            "Write exactly {count} questions targeting these concepts.",
+        ),
+    ]
+)
+
+# ---------------------------------------------------------------------------
 # grade_assignment_answers.grade_assignment_answers
 # ---------------------------------------------------------------------------
 # Grades every free-text answer in one attempt with a SINGLE call rather than
