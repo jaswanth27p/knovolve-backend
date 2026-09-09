@@ -18,7 +18,7 @@ def clean_db():
     with SessionLocal() as s:
         s.execute(text(
             "TRUNCATE refresh_tokens, learner_streaks, users, assignment_answers, assignment_attempts, "
-            "assignment_questions, assignments, chapter_content_sections, chapter_contents, "
+            "assignment_questions, assignment_user_topups, assignments, chapter_content_sections, chapter_contents, "
             "concept_edges, concepts, chapters, modules, course_jobs, courses, user_courses, "
             "checkpoint_writes, checkpoint_blobs, checkpoints RESTART IDENTITY CASCADE"
         ))

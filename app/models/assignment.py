@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, and_
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
@@ -59,8 +59,24 @@ class AssignmentQuestion(Base):
     explanation: Mapped[str] = mapped_column(Text)
     concept_tag: Mapped[str] = mapped_column(String(255))
     difficulty: Mapped[str] = mapped_column(String(16))  # "easy" | "medium" | "hard"
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     source_section_id: Mapped[int | None] = mapped_column(ForeignKey("chapter_content_sections.id"), nullable=True)
 
     __table_args__ = (
         Index("ix_assignment_questions_unique_order", "assignment_id", "order", unique=True),
+    )
+
+
+class AssignmentUserTopup(Base):
+    __tablename__ = "assignment_user_topups"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assignment_id: Mapped[int] = mapped_column(ForeignKey("assignments.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="generating")  # generating|ready|failed|skipped
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "user_id", name="uq_assignment_user_topup"),
     )

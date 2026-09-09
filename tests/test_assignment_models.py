@@ -5,14 +5,14 @@ from app.db import SessionLocal
 from app.models.course import Course, Module, Chapter
 from app.models.chapter_content import ChapterContent
 from app.models.user import User
-from app.models.assignment import Assignment, AssignmentQuestion
+from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 
 
 def _now():
     return datetime.now(timezone.utc)
 
 
-def _make_chapter_content(db, slug: str, scope: str = "global", user_id: int | None = None) -> int:
+def _make_chapter_content(db, slug: str, scope: str = "global", user_id: int | None = None) -> tuple[int, int]:
     course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=_now())
     db.add(course)
     db.flush()
@@ -96,5 +96,91 @@ def test_assignment_question_unique_order_per_assignment():
         db.add(AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="q2",
                                   options=["a", "b"], correct_answer="a", explanation="e",
                                   concept_tag="t", difficulty="easy"))
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+def test_assignment_question_user_id_null_round_trips_as_before():
+    with SessionLocal() as db:
+        content_id, _ = _make_chapter_content(db, "asg-model-f")
+        assignment = Assignment(level="chapter", chapter_content_id=content_id, scope="global",
+                                status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.commit()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="q1",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag="t", difficulty="easy")
+        db.add(question)
+        db.commit()
+        question_id = question.id
+
+    with SessionLocal() as db:
+        fetched = db.get(AssignmentQuestion, question_id)
+        assert fetched is not None
+        assert fetched.user_id is None
+
+
+def test_assignment_question_user_id_set_persists_and_reads_back():
+    with SessionLocal() as db:
+        user = User(email="asg-model-f2@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        content_id, _ = _make_chapter_content(db, "asg-model-f2")
+        assignment = Assignment(level="chapter", chapter_content_id=content_id, scope="global",
+                                status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.commit()
+        question = AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="q1",
+                                      options=["a", "b"], correct_answer="a", explanation="e",
+                                      concept_tag="t", difficulty="easy", user_id=user.id)
+        db.add(question)
+        db.commit()
+        question_id = question.id
+        user_id = user.id
+
+    with SessionLocal() as db:
+        fetched = db.get(AssignmentQuestion, question_id)
+        assert fetched is not None
+        assert fetched.user_id == user_id
+
+
+@pytest.mark.parametrize("status", ["generating", "ready", "failed", "skipped"])
+def test_assignment_user_topup_round_trips_each_status(status):
+    with SessionLocal() as db:
+        user = User(email=f"asg-model-topup-{status}@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        _, module_id = _make_chapter_content(db, f"asg-model-topup-{status}")
+        assignment = Assignment(level="module", module_id=module_id, scope="global",
+                                status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.commit()
+        topup = AssignmentUserTopup(assignment_id=assignment.id, user_id=user.id, status=status,
+                                    created_at=_now(), updated_at=_now())
+        db.add(topup)
+        db.commit()
+        topup_id = topup.id
+
+    with SessionLocal() as db:
+        fetched = db.get(AssignmentUserTopup, topup_id)
+        assert fetched is not None
+        assert fetched.status == status
+
+
+def test_assignment_user_topup_unique_constraint_rejects_duplicate_pair():
+    with SessionLocal() as db:
+        user = User(email="asg-model-topup-dup@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        _, module_id = _make_chapter_content(db, "asg-model-topup-dup")
+        assignment = Assignment(level="module", module_id=module_id, scope="global",
+                                status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.commit()
+        db.add(AssignmentUserTopup(assignment_id=assignment.id, user_id=user.id, status="generating",
+                                   created_at=_now(), updated_at=_now()))
+        db.commit()
+        db.add(AssignmentUserTopup(assignment_id=assignment.id, user_id=user.id, status="generating",
+                                   created_at=_now(), updated_at=_now()))
         with pytest.raises(IntegrityError):
             db.commit()
