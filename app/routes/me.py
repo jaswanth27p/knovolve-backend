@@ -9,7 +9,7 @@ from app.auth.dependencies import get_current_user
 from app.db import get_session
 from app.models.user import User
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.schemas.course import DashboardResponse, PaginatedTrackedCoursesResponse
+from app.schemas.course import ActivityResponse, DashboardResponse, PaginatedTrackedCoursesResponse
 from app.services import tracking
 from app.services import chat as chat_service
 
@@ -38,6 +38,14 @@ def get_my_courses(
 @router.get("/dashboard", response_model=DashboardResponse)
 def get_dashboard(db: Session = Depends(get_session), user: User = Depends(get_current_user)):
     return tracking.get_dashboard(db, user.id)
+
+
+@router.get("/activity", response_model=ActivityResponse)
+def get_activity(
+    days: int = Query(default=14, ge=1, le=90),
+    db: Session = Depends(get_session), user: User = Depends(get_current_user),
+):
+    return tracking.get_activity(db, user.id, days)
 
 
 @router.delete("/courses/{course_id}", status_code=204)
