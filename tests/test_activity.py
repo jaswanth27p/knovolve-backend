@@ -65,6 +65,9 @@ def test_activity_returns_only_own_graded_attempts_in_window():
     passed = [e for e in body["events"] if e["passed"]]
     assert len(passed) == 1 and passed[0]["score"] == 0.9
 
+    ats = [e["at"] for e in body["events"]]
+    assert ats == sorted(ats)
+
 
 def test_activity_excludes_other_users_and_pending_failed_attempts():
     headers_a = _auth_for("act-b@example.com")
@@ -73,6 +76,9 @@ def test_activity_excludes_other_users_and_pending_failed_attempts():
     now = datetime.now(timezone.utc)
     _attempt_row(uid_a, 0.8, now - timedelta(days=1))                       # own graded -> included
     _attempt_row(uid_a, 0.8, now - timedelta(days=1), status="failed")      # own but failed -> excluded
+
+    resp_a = client.get("/me/activity?days=14", headers=headers_a)
+    assert len(resp_a.json()["events"]) == 1
 
     resp_b = client.get("/me/activity?days=14", headers=headers_b)
     assert len(resp_b.json()["events"]) == 0
