@@ -11,6 +11,7 @@ LLM_NODES = {
     "generate_weak_concept_questions": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "grade_assignment_answers": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "chat_reply": {"provider": "opencode-go", "model": "mimo-v2.5"},
+    "extension_plan": {"provider": "opencode-go", "model": "mimo-v2.5"},
 }
 
 EMBEDDING_NODE = {"provider": "openrouter", "model": "nvidia/nemotron-3-embed-1b:free"}

@@ -569,3 +569,39 @@ CHAT_AGENT_SYSTEM_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# course_extension.agent.plan_new_chapters
+# ---------------------------------------------------------------------------
+# The agent must propose ONLY chapters not already covered. The outline JSON it
+# receives includes every existing chapter title/objective (global + this
+# user's bucket); it may call the read-only get_chapter_content tool to inspect
+# existing content before deciding. It must conclude with JSON only, matching
+# ExtensionPlanResponse — no prose wrap.
+EXTENSION_PLAN_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a curriculum designer for Knovolve, an adaptive learning "
+            "platform. A learner wants to extend a course with chapters "
+            "covering concepts it does not already teach.\n\n"
+            "Rules:\n"
+            "- Propose ONLY chapters covering material NOT already covered by "
+            "any existing chapter title, objective, or content you can see. "
+            "Do not duplicate a topic the course already teaches.\n"
+            "- If the request is already fully covered, return an empty "
+            "chapters list.\n"
+            "- Each chapter needs a SPECIFIC, content-bearing `title` (e.g. "
+            "'TCP Three-Way Handshake' not 'Networking') and an `objective` "
+            "that is a concrete, assessable statement.\n"
+            "- Propose at most 8 chapters.\n"
+            "- Use the read_chapter_content tool when you need to inspect a "
+            "chapter's existing content to judge overlap. It returns "
+            "'available: False' when the content was never generated.\n"
+            "- Conclude by outputting JSON ONLY, with no prose, matching: "
+            '{{"chapters": [{{"title": "...", "objective": "..."}}]}}',
+        ),
+        ("human", "Course outline (JSON):\n{outline_json}\n\nLearner request: {request}\n\n"
+                   "Respond with JSON only."),
+    ]
+)
