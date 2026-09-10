@@ -1,11 +1,14 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app.db import SessionLocal
 from app.models.chapter_content import ChapterContent
 from app.models.course import Chapter, Concept, Course, Module
 from app.models.enrollment import UserCourse
 from app.models.user import User
 from app.services.chat_tools import mastery as mastery_tools
+from app.services.chat_tools._errors import ChatToolError
 
 
 def _now():
@@ -42,6 +45,20 @@ def test_get_weak_concepts_by_chapter_scopes_to_one_chapter():
     with SessionLocal() as db:
         result = mastery_tools.get_weak_concepts_by_chapter(db, user_id, slug, chapter_a_id)
     assert result == {"concept-a": "strong"}
+
+
+def test_get_weak_concepts_by_chapter_rejects_chapter_from_other_course():
+    with SessionLocal() as db:
+        user = User(email="mt-c@example.com", password_hash="x")
+        db.add(user); db.flush()
+        course_a, _, chapter_a1, _ = _make_course_with_two_chapters(db, "mt-course-c1", user.id)
+        course_b, _, chapter_b1, _ = _make_course_with_two_chapters(db, "mt-course-c2", user.id)
+        db.commit()
+        user_id, slug_a, other_course_chapter_id = user.id, course_a.topic_slug, chapter_b1.id
+
+    with SessionLocal() as db:
+        with pytest.raises(ChatToolError):
+            mastery_tools.get_weak_concepts_by_chapter(db, user_id, slug_a, other_course_chapter_id)
 
 
 def test_get_recurring_weak_concepts_counts_across_versions():

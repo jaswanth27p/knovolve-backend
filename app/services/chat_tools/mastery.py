@@ -32,6 +32,9 @@ def get_weak_concepts_by_chapter(db: Session, user_id: int, course_slug: str, ch
     chapter = db.get(Chapter, chapter_id)
     if chapter is None:
         raise ChatToolError(f"No chapter {chapter_id}.")
+    module = db.get(Module, chapter.module_id)
+    if module is None or module.course_id != course.id:
+        raise ChatToolError(f"No chapter {chapter_id} in course '{course_slug}'.")
     names_in_chapter = set(db.scalars(select(Concept.name).where(Concept.chapter_id == chapter_id)).all())
     statuses = get_concept_statuses(db, user_id, course.id)
     return {name: status for name, status in statuses.items() if name in names_in_chapter}
