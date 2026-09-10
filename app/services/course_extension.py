@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
@@ -128,8 +128,7 @@ def _delete_cascade(db: Session, chapter: Chapter) -> None:
     ).all())
     assignment_ids = list(db.scalars(
         select(Assignment.id).where(
-            or_(Assignment.module_id == chapter.module_id,
-                (Assignment.chapter_content_id.in_(content_ids) if content_ids else Assignment.id.is_(None)))
+            Assignment.chapter_content_id.in_(content_ids) if content_ids else Assignment.id.is_(None)
         )
     ).all())
     if assignment_ids:
