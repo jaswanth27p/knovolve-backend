@@ -58,7 +58,7 @@ def test_create_poll_list_delete_flow():
     from sqlalchemy import select
     with S() as db:
         course = db.query(Course).filter_by(topic_slug="ext-api-course").one()
-        uid = db.scalar(select(User.id).limit(1))
+        uid = db.scalar(select(User.id).where(User.email == "ext-user@example.com"))
         assert uid is not None
         added = svc.append_chapters(db, uid, course, [{"title": "TCP", "objective": "o"}])
         job = db.scalar(select(J).where(J.id == job_id))
@@ -103,7 +103,7 @@ def test_other_user_cannot_see_or_delete():
     from sqlalchemy import select
     with S() as db:
         course = db.query(Course).filter_by(topic_slug="ext-api-course").one()
-        uid = db.scalar(select(User.id).limit(1))
+        uid = db.scalar(select(User.id).where(User.email == "ext-user@example.com"))
         assert uid is not None
         added = svc.append_chapters(db, uid, course, [{"title": "Private", "objective": "o"}])
         db.commit()
