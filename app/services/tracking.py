@@ -1,14 +1,24 @@
 """Tracking service: a learner's enrolled/tracked courses and dashboard."""
+from datetime import datetime, timedelta, timezone
+
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.attempt import AssignmentAttempt
 from app.models.chapter_content import ChapterContent
 from app.models.course import Course, Module, Chapter
 from app.models.enrollment import UserCourse
 from app.models.learner_streak import LearnerStreak
-from app.schemas.course import DashboardResponse, StreakResponse, TrackedCourseResponse
+from app.schemas.course import (
+    ActivityEvent,
+    ActivityResponse,
+    DashboardResponse,
+    StreakResponse,
+    TrackedCourseResponse,
+)
 from app.services import mastery
+from app.services.progression import PASS_THRESHOLD
 
 
 def _serialize_tracked(db: Session, uc: UserCourse) -> TrackedCourseResponse:
@@ -93,3 +103,29 @@ def untrack_course(db: Session, user_id: int, course_id: int) -> None:
         raise HTTPException(status_code=404, detail="course not tracked")
     db.delete(row)
     db.commit()
+
+
+def get_activity(db: Session, user_id: int, days: int = 14) -> ActivityResponse:
+    """Raw graded attempts for `days` local calendar days. Fetches `days + 1`
+    UTC days so the browser's local-time bucketing never misses edge events at
+    the UTC/local day boundary (a local day can start ~1 UTC day before/after
+    its UTC equivalent)."""
+    since = datetime.now(timezone.utc) - timedelta(days=days + 1)
+    rows = db.scalars(
+        select(AssignmentAttempt)
+        .where(
+            AssignmentAttempt.user_id == user_id,
+            AssignmentAttempt.status == "graded",
+            AssignmentAttempt.created_at >= since,
+        )
+        .order_by(AssignmentAttempt.created_at.asc())
+    ).all()
+    events = [
+        ActivityEvent(
+            at=attempt.created_at,
+            score=attempt.overall_score if attempt.overall_score is not None else 0.0,
+            passed=attempt.overall_score is not None and attempt.overall_score >= PASS_THRESHOLD,
+        )
+        for attempt in rows
+    ]
+    return ActivityResponse(days=days, events=events)
