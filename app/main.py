@@ -11,6 +11,7 @@ from app.observability import (
     setup_sentry,
     setup_tracing,
 )
+from app.routes.course_extensions import router as course_extensions_router
 from app.routes.courses import router as courses_router
 from app.routes.me import router as me_router
 
@@ -31,6 +32,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(courses_router)
+app.include_router(course_extensions_router)
 app.include_router(me_router)
 
 instrument_static()

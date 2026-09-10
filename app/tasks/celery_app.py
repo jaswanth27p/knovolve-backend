@@ -17,6 +17,7 @@ celery_app = Celery("knovolve", broker=settings.redis_url, backend=settings.redi
 # the jobs users enqueue. Without this the worker connects but has zero tasks.
 celery_app.conf.include = [
     "app.tasks.course_creation_task",
+    "app.tasks.course_extension_task",
     "app.tasks.render_diagram_task",
     "app.tasks.assignment_tasks",
     "app.tasks.evaluation_tasks",

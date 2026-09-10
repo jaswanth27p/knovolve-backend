@@ -124,3 +124,28 @@ class ChapterContentSectionResponse(BaseModel):
 class ChapterVersionDetail(ChapterVersionSummary):
     error: str | None = None
     sections: list[ChapterContentSectionResponse]
+
+
+class CreateExtensionRequest(BaseModel):
+    message: str
+
+
+class ExtensionChapterResult(BaseModel):
+    chapter_id: int
+    title: str
+    objective: str
+
+
+class ExtensionJobResponse(BaseModel):
+    status: str
+    job_id: int | None = None
+    error: str | None = None
+    added: list[ExtensionChapterResult] | None = None
+
+
+class ExtensionChapterSummary(BaseModel):
+    id: int
+    title: str
+    objective: str
+    order: int
+    content_ready: bool
