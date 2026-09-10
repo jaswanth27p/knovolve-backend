@@ -4,6 +4,7 @@ persisted server-side, see docs/superpowers/specs/2026-09-10-agentic-chat-
 context-design.md) and resends it on every later turn; the agent seeds its
 system prompt from that bundle and calls into app.services.chat_tools for
 anything deeper or more current, always live against the DB."""
+import logging
 from typing import Iterator
 
 from langchain_core.language_models import LanguageModelInput
@@ -20,9 +21,16 @@ from app.services.chat_context import build_context_bundle
 from app.services.chat_tools._errors import ChatToolError
 from app.services.chat_tools.registry import build_tools
 
+logger = logging.getLogger(__name__)
+
 # Hard cap on tool-call round-trips per message so a model that keeps calling
 # tools (bad args, a tool that never satisfies it) can't loop forever.
 MAX_TOOL_ROUNDS = 5
+
+# Used whenever the model never produces any text of its own — it burned through
+# MAX_TOOL_ROUNDS still asking for tools, or streamed zero tokens. Better than
+# handing the user a blank reply with no signal that anything went wrong.
+FALLBACK_REPLY = "I wasn't able to finish looking that up — try rephrasing your question?"
 
 #: What `ChatOpenAI.bind_tools(...)` hands back.
 BoundModel = Runnable[LanguageModelInput, BaseMessage]
@@ -62,7 +70,13 @@ def _run_tool_rounds(
                 try:
                     result = tool_fn.invoke(call["args"])
                 except ChatToolError as exc:
+                    # ChatToolError messages are written to be model-facing.
                     result = f"Error: {exc}"
+                except Exception:  # noqa: BLE001 - bad/hallucinated args (pydantic
+                    # ValidationError) or any runtime/DB failure inside a tool must
+                    # not 500 the request; the model gets a chance to recover.
+                    logger.warning("chat tool %r failed", call["name"], exc_info=True)
+                    result = "Error: something went wrong calling this tool."
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
     return None
 
@@ -91,7 +105,9 @@ def answer_chat_message(db: Session, user_id: int, req: ChatRequest) -> ChatResp
     content = resp.content
     if not isinstance(content, str):
         raise TypeError(f"expected str content from LLM response, got {type(content)}")
-    return ChatResponse(reply=content.strip(), context=None if req.context is not None else bundle)
+    # The fallback re-invoke can itself come back with tool_calls and empty text.
+    reply = content.strip() or FALLBACK_REPLY
+    return ChatResponse(reply=reply, context=None if req.context is not None else bundle)
 
 
 def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator[dict]:
@@ -99,13 +115,20 @@ def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator
     if req.context is None:
         yield {"type": "context", "bundle": bundle.model_dump(mode="json")}
 
-    model, messages, _ = _build_agent(db, user_id, req, bundle)
+    # `_build_agent` runs the tool rounds, so it belongs inside the try: the
+    # response has already started streaming and any failure from here on has to
+    # reach the client as an `error` event, not as a truncated stream.
+    yielded_any = False
     try:
+        model, messages, _ = _build_agent(db, user_id, req, bundle)
         for chunk in model.stream(messages):
             content = chunk.content
             if isinstance(content, str) and content:
+                yielded_any = True
                 yield {"type": "token", "text": content}
     except Exception:  # noqa: BLE001 - surfaced to the client as a chat error, not a 500
         yield {"type": "error", "message": "Failed to generate a reply. Please try again."}
         return
+    if not yielded_any:
+        yield {"type": "token", "text": FALLBACK_REPLY}
     yield {"type": "done"}

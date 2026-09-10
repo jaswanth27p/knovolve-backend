@@ -116,3 +116,107 @@ def test_stream_omits_context_event_when_request_already_has_one(monkeypatch):
         ))
     assert events[0]["type"] == "token"
     assert events[-1] == {"type": "done"}
+
+
+def test_stream_emits_error_event_when_tool_rounds_blow_up(monkeypatch):
+    """`_build_agent` runs inside the try:, so a failure during the tool rounds
+    (here the LLM call itself) reaches the client as an `error` event rather than
+    escaping the generator and truncating an already-started response."""
+    model = MagicMock()
+    model.bind_tools.return_value = model
+    model.invoke.side_effect = RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="hi")))
+
+    assert events[0]["type"] == "context"
+    assert events[-1] == {"type": "error", "message": "Failed to generate a reply. Please try again."}
+
+
+def test_stream_survives_a_tool_raising_a_plain_exception(monkeypatch):
+    """The broadened catch in `_run_tool_rounds` keeps a non-ChatToolError tool
+    failure inside the loop, so the stream still completes normally."""
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "get_user_stats", "args": {}, "id": "call-1", "type": "tool_call"}],
+    )
+    model = _bound_model([tool_call_response, AIMessage(content="recovered")])
+    model.stream.return_value = [MagicMock(content="recovered")]
+
+    exploding_tool = MagicMock()
+    exploding_tool.name = "get_user_stats"
+    exploding_tool.invoke.side_effect = RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [exploding_tool])
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="stats?")))
+
+    assert not any(e["type"] == "error" for e in events)
+    assert events[-1] == {"type": "done"}
+
+
+def test_answer_turns_unexpected_tool_exception_into_tool_message_not_a_500(monkeypatch):
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "get_user_stats", "args": {"bogus": 1}, "id": "call-1", "type": "tool_call"}],
+    )
+    final_response = AIMessage(content="Sorry, I couldn't look that up.")
+    model = _bound_model([tool_call_response, final_response])
+
+    exploding_tool = MagicMock()
+    exploding_tool.name = "get_user_stats"
+    exploding_tool.invoke.side_effect = RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [exploding_tool])
+
+    with SessionLocal() as db:
+        response = chat.answer_chat_message(db, user_id=1, req=ChatRequest(message="how am I doing?"))
+
+    assert response.reply == "Sorry, I couldn't look that up."
+    # The model is told the tool failed, without the raw exception text leaking.
+    tool_message = model.invoke.call_args_list[-1].args[0][-1]
+    assert tool_message.content == "Error: something went wrong calling this tool."
+    assert "boom" not in tool_message.content
+
+
+def test_answer_falls_back_when_model_never_stops_calling_tools(monkeypatch):
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "get_user_stats", "args": {}, "id": "call-1", "type": "tool_call"}],
+    )
+    model = MagicMock()
+    model.bind_tools.return_value = model
+    model.invoke.return_value = tool_call_response  # never a tool-free answer
+
+    fake_tool = MagicMock()
+    fake_tool.name = "get_user_stats"
+    fake_tool.invoke.return_value = {"assignments_attempted_today": 1}
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [fake_tool])
+
+    with SessionLocal() as db:
+        response = chat.answer_chat_message(db, user_id=1, req=ChatRequest(message="how am I doing?"))
+
+    assert response.reply == chat.FALLBACK_REPLY
+    # MAX_TOOL_ROUNDS rounds plus the one fallback re-invoke.
+    assert model.invoke.call_count == chat.MAX_TOOL_ROUNDS + 1
+
+
+def test_stream_yields_fallback_reply_when_no_tokens_are_produced(monkeypatch):
+    model = _bound_model([AIMessage(content="")])
+    model.stream.return_value = []
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="hi")))
+
+    assert events[-2] == {"type": "token", "text": chat.FALLBACK_REPLY}
+    assert events[-1] == {"type": "done"}
