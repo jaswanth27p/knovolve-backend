@@ -541,29 +541,31 @@ GENERATE_REMEDIATION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 # ---------------------------------------------------------------------------
-# chat.answer_chat_message (free-form fallback)
+# chat.answer_chat_message / stream_chat_message (tool-calling agent)
 # ---------------------------------------------------------------------------
-# The floating chatbot answers a few fixed question shapes (progress,
-# latest-result) with deterministic Python, no LLM call needed. Everything
-# else falls through here: a short, grounded reply using only the learner
-# context the service already resolved (dashboard stats, current course/
-# chapter, weak/strong concepts, latest attempt) — never invented facts.
-CHAT_REPLY_PROMPT = ChatPromptTemplate.from_messages(
+# Replaces the old keyword-routed CHAT_REPLY_PROMPT: the agent now has tools
+# (app.services.chat_tools.registry.build_tools) for anything beyond the
+# coarse bundle below, and decides itself when a tool call is needed instead
+# of Python keyword-matching the message.
+CHAT_AGENT_SYSTEM_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
             "You are the in-app assistant for Knovolve, an adaptive learning "
-            "platform. A learner is asking a question while studying. Answer "
-            "briefly (1-3 sentences, no markdown headers or bullet lists) and "
-            "conversationally.\n\n"
-            "Ground your answer ONLY in the context below — never invent a "
-            "course, chapter, score, or concept that isn't listed there. If "
-            "the context doesn't contain what's needed to answer, say so "
-            "plainly and suggest what the learner could do instead (e.g. "
-            "open the relevant chapter or check the dashboard) rather than "
-            "guessing.\n\n"
-            "Learner context:\n{context}",
+            "platform. Answer the learner's question using the context below "
+            "and the tools available to you. Call a tool whenever the answer "
+            "needs data not already in the context below -- never invent a "
+            "course, chapter, score, concept, or answer you haven't actually "
+            "seen from the context or a tool result. If a tool reports "
+            "something isn't available (e.g. chapter content not generated, "
+            "course not started), say so plainly instead of guessing.\n\n"
+            "Format your reply in Markdown (lists, tables, links) where it "
+            "helps readability. When you mention a course, include its "
+            "`course_url` as a Markdown link so the learner can click "
+            "through.\n\n"
+            "Learner context (coarse -- call a tool for anything deeper or "
+            "more current):\n{bundle_json}\n\n"
+            "Learner's current location in the app:\n{route_json}",
         ),
-        ("human", "{message}"),
     ]
 )
