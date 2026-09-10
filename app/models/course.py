@@ -26,6 +26,12 @@ class CourseJob(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending|running|succeeded|failed
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True)
+    # Who triggered this job, for the "your in-flight courses" list on the
+    # Learn page only — courses/modules themselves stay global/public, this
+    # is purely job-tracking. Nullable: a dedup hit can attach a caller to a
+    # job someone else created (see create_course_job), and that job's
+    # ownership doesn't change.
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

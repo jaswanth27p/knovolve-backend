@@ -36,8 +36,8 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (http_status) (rate(http_requests_total[5m]))",
-          "legendFormat": "{{http_status}}",
+          "expr": "sum by (status) (rate(http_requests_total[5m]))",
+          "legendFormat": "{{status}}",
           "range": true,
           "refId": "A"
         }
@@ -111,7 +111,7 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "unit": "short"
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -124,21 +124,82 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(process_cpu_seconds_total[5m])",
-          "legendFormat": "cpu",
+          "expr": "rate(http_response_size_bytes_sum[5m])",
+          "legendFormat": "response",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "process_resident_memory_bytes",
-          "legendFormat": "rss",
+          "expr": "rate(http_request_size_bytes_sum[5m])",
+          "legendFormat": "request",
           "range": true,
           "refId": "B"
         }
       ],
-      "title": "Process CPU / Memory",
+      "title": "Request / Response Size",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "{service_name=\"knovolve-backend\"} |= ``",
+          "legendFormat": "",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Application Logs",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "displayMode": "auto", "inspect": false }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "startTime" },
+            "properties": [{ "id": "unit", "value": "dateTimeAsIso" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "traceDuration" },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 28 },
+      "id": 6,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Start time", "desc": true }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "refId": "A",
+          "query": "{resource.service.name=\"knovolve-backend\"}",
+          "limit": 20
+        }
+      ],
+      "title": "Recent Traces",
+      "type": "table"
     }
   ],
   "refresh": "30s",

@@ -6,7 +6,7 @@ from typing import Iterator
 
 import redis
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.agents.chapter_content.generate import stream_chapter_content
@@ -14,6 +14,7 @@ from app.config import settings
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Course, Module, Chapter
 from app.realtime.chapter_content_events import channel_name
+from app.schemas.course import ChapterContentSectionResponse, ChapterVersionDetail, ChapterVersionSummary
 
 
 def get_chapter(db: Session, course: Course, chapter_id: int) -> Chapter:
@@ -115,3 +116,54 @@ def stream_content_events(chapter: Chapter, db: Session, user_id: int) -> Iterat
             yield from _tail_pending_diagrams(db, content.id, pending_orders)
 
     yield terminal or {"type": "done"}
+
+
+def _visible_to_user(user_id: int):
+    """Same precedence set as `_resolve_content_for_user`: the chapter's
+    shared V1 (scope="global") plus this user's own remediation versions
+    (scope="user", user_id=user_id) — never another user's."""
+    return or_(
+        ChapterContent.scope == "global",
+        and_(ChapterContent.scope == "user", ChapterContent.user_id == user_id),
+    )
+
+
+def list_chapter_versions(db: Session, chapter: Chapter, user_id: int) -> list[ChapterVersionSummary]:
+    rows = db.scalars(
+        select(ChapterContent)
+        .where(ChapterContent.chapter_id == chapter.id, _visible_to_user(user_id))
+        .order_by(ChapterContent.version)
+    ).all()
+    return [
+        ChapterVersionSummary(
+            version=row.version, status=row.status, created_at=row.created_at,
+            remediation_target_tags=row.remediation_target_tags,
+        )
+        for row in rows
+    ]
+
+
+def get_chapter_version(db: Session, chapter: Chapter, user_id: int, version: int) -> ChapterVersionDetail:
+    content = db.scalar(
+        select(ChapterContent).where(
+            ChapterContent.chapter_id == chapter.id, ChapterContent.version == version, _visible_to_user(user_id),
+        )
+    )
+    if content is None:
+        raise HTTPException(status_code=404, detail="chapter version not found")
+    sections = db.scalars(
+        select(ChapterContentSection)
+        .where(ChapterContentSection.chapter_content_id == content.id)
+        .order_by(ChapterContentSection.order)
+    ).all()
+    return ChapterVersionDetail(
+        version=content.version, status=content.status, created_at=content.created_at,
+        remediation_target_tags=content.remediation_target_tags, error=content.error,
+        sections=[
+            ChapterContentSectionResponse(
+                order=s.order, heading=s.heading, kind=s.kind, body_markdown=s.body_markdown,
+                examples=s.examples, diagram_status=s.diagram_status, diagram_image_url=s.diagram_image_url,
+            )
+            for s in sections
+        ],
+    )

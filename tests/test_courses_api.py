@@ -104,6 +104,39 @@ def test_post_courses_recovers_when_concurrent_job_claims_slug():
     with SessionLocal() as db:
         assert db.query(CourseJob).filter_by(topic_slug="elixir", status="running").count() == 1
 
+def test_post_courses_blocks_second_job_while_one_is_ongoing():
+    """A user can only have one course generation in flight at a time —
+    the /learn UI blocks the create form while a job is running, so a
+    second request for this user must attach to the existing job rather
+    than starting a new one, regardless of topic."""
+    headers = _auth_headers()
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    from app.models.course import CourseJob
+    from app.models.user import User
+    with SessionLocal() as db:
+        user_id = db.query(User).filter_by(email="course-user@example.com").one().id
+        job = CourseJob(topic_slug="elixir", topic_raw="Elixir", topic_embedding=[0.0] * 2048,
+                        status="running", created_by_user_id=user_id,
+                        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        ongoing_job_id = job.id
+
+    with patch("app.services.courses._canonicalize") as mock_can, \
+         patch("app.services.courses.embed") as mock_embed, \
+         patch("app.services.courses.find_existing") as mock_find, \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
+        resp = client.post("/courses", json={"topic": "Rust"}, headers=headers)
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "pending"
+    assert resp.json()["job_id"] == ongoing_job_id
+    mock_can.assert_not_called()
+    mock_embed.assert_not_called()
+    mock_find.assert_not_called()
+    mock_delay.assert_not_called()
+
 def test_get_job_status():
     headers = _auth_headers()
     from datetime import datetime, timezone
@@ -277,8 +310,63 @@ def test_get_public_courses_excludes_tracked():
 
     resp = client.get("/courses", headers=headers)
     body = resp.json()
-    slugs = {c["topic_slug"] for c in body}
+    slugs = {c["topic_slug"] for c in body["items"]}
     assert "pub-1" in slugs
     assert "pub-2" not in slugs
-    row = next(c for c in body if c["topic_slug"] == "pub-1")
+    row = next(c for c in body["items"] if c["topic_slug"] == "pub-1")
     assert row["module_count"] == 1
+
+
+def _make_public_course(slug: str, title: str):
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    from app.models.course import Course
+    with SessionLocal() as db:
+        course = Course(topic_slug=slug, topic_raw=title,
+                        topic_embedding=[0.0] * 2048, created_at=datetime.now(timezone.utc))
+        db.add(course)
+        db.commit()
+        db.refresh(course)
+        return course.id
+
+
+def test_get_public_courses_paginated_envelope():
+    headers = _auth_headers()
+    _make_public_course("pg-1", "Pg One")
+    _make_public_course("pg-2", "Pg Two")
+    _make_public_course("pg-3", "Pg Three")
+
+    resp = client.get("/courses?page=1&limit=2", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["items"]) == 2
+    assert body["total"] == 3
+    assert body["page"] == 1
+    assert body["limit"] == 2
+    assert body["total_pages"] == 2
+
+    resp2 = client.get("/courses?page=2&limit=2", headers=headers)
+    body2 = resp2.json()
+    assert len(body2["items"]) == 1
+    assert body2["total"] == 3
+
+
+def test_get_public_courses_search_filters_by_title():
+    headers = _auth_headers()
+    _make_public_course("srch-rust", "Rust Basics")
+    _make_public_course("srch-elixir", "Elixir Guide")
+
+    resp = client.get("/courses?search=rust", headers=headers)
+    body = resp.json()
+    slugs = {c["topic_slug"] for c in body["items"]}
+    assert slugs == {"srch-rust"}
+
+
+def test_get_public_courses_sort_by_name_asc():
+    headers = _auth_headers()
+    _make_public_course("sort-zebra", "Zebra")
+    _make_public_course("sort-alpha", "Alpha")
+
+    resp = client.get("/courses?sort=name&order=asc", headers=headers)
+    titles = [c["topic_raw"] for c in resp.json()["items"]]
+    assert titles.index("Alpha") < titles.index("Zebra")

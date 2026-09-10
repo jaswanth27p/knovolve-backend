@@ -411,3 +411,60 @@ def test_get_attempt_404_for_another_users_attempt():
     other_headers = _auth_headers("att-api-i-other@example.com")
     resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=other_headers)
     assert resp.status_code == 404
+
+
+def test_list_attempts_requires_auth():
+    resp = client.get("/courses/nonexistent/assignments/1/attempts")
+    assert resp.status_code == 401
+
+
+def test_list_attempts_empty_when_never_attempted():
+    headers = _auth_headers("att-api-k@example.com")
+    slug, assignment_id, _ = _make_ready_assignment("att-api-k")
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_list_attempts_returns_most_recent_first_scoped_to_caller():
+    headers = _auth_headers("att-api-l@example.com")
+    slug, assignment_id, question_ids = _make_ready_assignment("att-api-l", question_count=1)
+
+    def _fake_grade(attempt_id):
+        with SessionLocal() as db:
+            attempt = db.get(AssignmentAttempt, attempt_id)
+            assert attempt is not None
+            attempt.status = "graded"
+            attempt.overall_score = 0.5
+            db.commit()
+
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task:
+        mock_task.delay.side_effect = _fake_grade
+        first = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
+            headers=headers,
+        ).json()["attempt_id"]
+        second = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "b"}]},
+            headers=headers,
+        ).json()["attempt_id"]
+
+    # Another user's attempt on the same assignment must not leak into this
+    # caller's list.
+    other_headers = _auth_headers("att-api-l-other@example.com")
+    with patch("app.services.attempts.grade_assignment_attempt_task"):
+        client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [{"question_id": question_ids[0], "answer": "a"}]},
+            headers=other_headers,
+        )
+
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [a["id"] for a in body] == [second, first]
+    assert body[0]["status"] == "graded"
+    assert body[0]["overall_score"] == 0.5
+    assert body[0]["passed"] is False

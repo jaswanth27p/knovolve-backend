@@ -539,3 +539,31 @@ GENERATE_REMEDIATION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# ---------------------------------------------------------------------------
+# chat.answer_chat_message (free-form fallback)
+# ---------------------------------------------------------------------------
+# The floating chatbot answers a few fixed question shapes (progress,
+# latest-result) with deterministic Python, no LLM call needed. Everything
+# else falls through here: a short, grounded reply using only the learner
+# context the service already resolved (dashboard stats, current course/
+# chapter, weak/strong concepts, latest attempt) — never invented facts.
+CHAT_REPLY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are the in-app assistant for Knovolve, an adaptive learning "
+            "platform. A learner is asking a question while studying. Answer "
+            "briefly (1-3 sentences, no markdown headers or bullet lists) and "
+            "conversationally.\n\n"
+            "Ground your answer ONLY in the context below — never invent a "
+            "course, chapter, score, or concept that isn't listed there. If "
+            "the context doesn't contain what's needed to answer, say so "
+            "plainly and suggest what the learner could do instead (e.g. "
+            "open the relevant chapter or check the dashboard) rather than "
+            "guessing.\n\n"
+            "Learner context:\n{context}",
+        ),
+        ("human", "{message}"),
+    ]
+)

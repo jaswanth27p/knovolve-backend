@@ -20,6 +20,7 @@ When pyright surfaces errors: fix ones in files your plan created or touched. Pr
 - Type check: `cd backend && .venv/bin/pyright`
 - Migrations: `cd backend && .venv/bin/alembic revision --autogenerate -m "..."` / `.venv/bin/alembic upgrade head`
 - Infra: `docker compose up -d` (Postgres + Redis + MinIO)
+- Worker (macOS): `SSL_CERT_FILE=$(.venv/bin/python -c "import certifi; print(certifi.where())") .venv/bin/celery -A app.tasks.celery_app worker --loglevel=info` — without this, httpx2 defaults to truststore (macOS Security.framework via ctypes) and prefork children SIGABRT on first LLM TLS call when fork lands mid-ObjC-init; Linux/prod unaffected
 
 ## Conventions
 

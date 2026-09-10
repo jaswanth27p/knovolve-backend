@@ -14,6 +14,7 @@ from app.schemas.attempt import (
     AnswerResult,
     AttemptResponse,
     AttemptSubmitResponse,
+    AttemptSummary,
     ConceptScore,
     SubmitAttemptRequest,
 )
@@ -113,6 +114,26 @@ def _serialize_attempt(attempt: AssignmentAttempt, assignment: Assignment, db: S
         chapter_id=chapter_id,
         next_chapter_id=next_chapter_id,
     )
+
+
+def list_attempts(db: Session, user_id: int, course: Course, assignment_id: int) -> list[AttemptSummary]:
+    """This user's own attempts on `assignment_id`, most recent first — drives
+    the assignment page's "you've already attempted this" default view and
+    its full attempt history."""
+    assignment = assignments.get_assignment_for_course(db, assignment_id, course)
+    attempts = db.scalars(
+        select(AssignmentAttempt)
+        .where(AssignmentAttempt.assignment_id == assignment.id, AssignmentAttempt.user_id == user_id)
+        .order_by(AssignmentAttempt.created_at.desc())
+    ).all()
+    return [
+        AttemptSummary(
+            id=a.id, status=a.status, overall_score=a.overall_score,
+            passed=a.overall_score >= PASS_THRESHOLD if a.overall_score is not None else None,
+            created_at=a.created_at,
+        )
+        for a in attempts
+    ]
 
 
 def get_attempt(db: Session, user_id: int, course: Course, assignment_id: int,

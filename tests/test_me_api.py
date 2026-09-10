@@ -70,12 +70,67 @@ def test_me_courses_returns_only_own():
     resp = client.get("/me/courses", headers=headers)
     assert resp.status_code == 200
     body = resp.json()
-    slugs = {r["topic_slug"] for r in body}
+    slugs = {r["topic_slug"] for r in body["items"]}
     assert slugs == {"me-a-1", "me-a-2"}
-    row = next(r for r in body if r["topic_slug"] == "me-a-1")
+    row = next(r for r in body["items"] if r["topic_slug"] == "me-a-1")
     assert row["module_count"] == 1
     assert row["chapter_count"] == 1
     assert row["content_ready"] is False
+
+
+def test_me_courses_paginated_envelope():
+    headers = _auth_for("me-pg@example.com")
+    user_id = _get_user_id("me-pg@example.com")
+    _enroll(user_id, _make_course("me-pg-1"))
+    _enroll(user_id, _make_course("me-pg-2"))
+    _enroll(user_id, _make_course("me-pg-3"))
+
+    resp = client.get("/me/courses?page=1&limit=2", headers=headers)
+    body = resp.json()
+    assert len(body["items"]) == 2
+    assert body["total"] == 3
+    assert body["page"] == 1
+    assert body["limit"] == 2
+    assert body["total_pages"] == 2
+
+
+def test_me_courses_search_filters_by_title():
+    headers = _auth_for("me-srch@example.com")
+    user_id = _get_user_id("me-srch@example.com")
+    _enroll(user_id, _make_course("me-srch-rust"))
+    _enroll(user_id, _make_course("me-srch-elixir"))
+
+    resp = client.get("/me/courses?search=rust", headers=headers)
+    slugs = {r["topic_slug"] for r in resp.json()["items"]}
+    assert slugs == {"me-srch-rust"}
+
+
+def test_me_courses_status_filter():
+    headers = _auth_for("me-status@example.com")
+    user_id = _get_user_id("me-status@example.com")
+    c1 = _make_course("me-status-1")
+    c2 = _make_course("me-status-2")
+    _enroll(user_id, c1)
+    _enroll(user_id, c2)
+    with SessionLocal() as db:
+        row = db.query(UserCourse).filter_by(user_id=user_id, course_id=c2).one()
+        row.status = "completed"
+        db.commit()
+
+    resp = client.get("/me/courses?status=completed", headers=headers)
+    slugs = {r["topic_slug"] for r in resp.json()["items"]}
+    assert slugs == {"me-status-2"}
+
+
+def test_me_courses_sort_by_name_asc():
+    headers = _auth_for("me-sort@example.com")
+    user_id = _get_user_id("me-sort@example.com")
+    _enroll(user_id, _make_course("me-sort-zebra"))
+    _enroll(user_id, _make_course("me-sort-alpha"))
+
+    resp = client.get("/me/courses?sort=name&order=asc", headers=headers)
+    slugs = [r["topic_slug"] for r in resp.json()["items"]]
+    assert slugs.index("me-sort-alpha") < slugs.index("me-sort-zebra")
 
 
 def test_me_courses_content_ready_true():
@@ -84,7 +139,7 @@ def test_me_courses_content_ready_true():
     c = _make_course("me-b-1", content_ready=True)
     _enroll(user_id, c)
     resp = client.get("/me/courses", headers=headers)
-    row = next(r for r in resp.json() if r["topic_slug"] == "me-b-1")
+    row = next(r for r in resp.json()["items"] if r["topic_slug"] == "me-b-1")
     assert row["content_ready"] is True
 
 
@@ -94,7 +149,7 @@ def test_me_courses_content_ready_two_chapters_all_ready():
     c = _make_course("me-f-1", content_ready=True, num_chapters=2)
     _enroll(user_id, c)
     resp = client.get("/me/courses", headers=headers)
-    row = next(r for r in resp.json() if r["topic_slug"] == "me-f-1")
+    row = next(r for r in resp.json()["items"] if r["topic_slug"] == "me-f-1")
     assert row["chapter_count"] == 2
     assert row["content_ready"] is True
 
@@ -108,13 +163,14 @@ def test_me_courses_content_ready_partial_is_false():
         course = db.query(Course).filter_by(topic_slug="me-g-1").one()
         module = db.query(Module).filter_by(course_id=course.id).one()
         chapter = db.query(Chapter).filter_by(module_id=module.id).order_by(Chapter.order).first()
+        assert chapter is not None
         db.add(ChapterContent(chapter_id=chapter.id, version=1, scope="global",
                               status="ready", outline=[],
                               created_at=now, updated_at=now))
         db.commit()
     _enroll(user_id, c)
     resp = client.get("/me/courses", headers=headers)
-    row = next(r for r in resp.json() if r["topic_slug"] == "me-g-1")
+    row = next(r for r in resp.json()["items"] if r["topic_slug"] == "me-g-1")
     assert row["chapter_count"] == 2
     assert row["content_ready"] is False
 
@@ -125,7 +181,7 @@ def test_me_courses_content_ready_no_chapters_is_false():
     c = _make_course("me-h-1", with_chapter=False)
     _enroll(user_id, c)
     resp = client.get("/me/courses", headers=headers)
-    row = next(r for r in resp.json() if r["topic_slug"] == "me-h-1")
+    row = next(r for r in resp.json()["items"] if r["topic_slug"] == "me-h-1")
     assert row["chapter_count"] == 0
     assert row["content_ready"] is False
 

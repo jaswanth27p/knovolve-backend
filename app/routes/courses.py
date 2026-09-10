@@ -1,15 +1,24 @@
 import json
-from typing import Iterator
-from fastapi import APIRouter, Depends, Response
+import math
+from typing import Iterator, Literal
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.db import get_session
 from app.services import assignments, attempts, chapter_content, courses
 from app.services.enrollment import touch_enrollment
 from app.auth.dependencies import get_current_user
-from app.schemas.course import CreateCourseRequest, CourseJobResponse, PublicCourseResponse
+from app.schemas.course import (
+    ChapterVersionDetail,
+    ChapterVersionSummary,
+    CreateCourseRequest,
+    CourseJobResponse,
+    MyCourseJobResponse,
+    PaginatedPublicCoursesResponse,
+    PublicCourseResponse,
+)
 from app.schemas.assignment import AssignmentResponse
-from app.schemas.attempt import SubmitAttemptRequest, AttemptSubmitResponse, AttemptResponse
+from app.schemas.attempt import SubmitAttemptRequest, AttemptSubmitResponse, AttemptResponse, AttemptSummary
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -28,6 +37,11 @@ def get_job(job_id: int, db: Session = Depends(get_session), user=Depends(get_cu
     return courses.get_course_job(db, job_id)
 
 
+@router.get("/jobs", response_model=list[MyCourseJobResponse])
+def list_my_jobs(db: Session = Depends(get_session), user=Depends(get_current_user)):
+    return courses.list_my_course_jobs(db, user.id)
+
+
 @router.post("/jobs/{job_id}/retry", response_model=CourseJobResponse, status_code=202)
 def retry_job(job_id: int, response: Response, db: Session = Depends(get_session),
               user=Depends(get_current_user)):
@@ -37,9 +51,22 @@ def retry_job(job_id: int, response: Response, db: Session = Depends(get_session
     return result
 
 
-@router.get("", response_model=list[PublicCourseResponse])
-def list_public_courses(db: Session = Depends(get_session), user=Depends(get_current_user)):
-    return courses.list_public_courses(db, user.id)
+@router.get("", response_model=PaginatedPublicCoursesResponse)
+def list_public_courses(
+    search: str | None = None,
+    sort: Literal["name", "date"] = "date",
+    order: Literal["asc", "desc"] = "desc",
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_session), user=Depends(get_current_user),
+):
+    items, total = courses.list_public_courses(
+        db, user.id, search=search, sort=sort, order=order, page=page, limit=limit
+    )
+    return PaginatedPublicCoursesResponse(
+        items=items, total=total, page=page, limit=limit,
+        total_pages=math.ceil(total / limit) if total else 0,
+    )
 
 
 @router.get("/{slug}")
@@ -66,12 +93,36 @@ def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_se
     )
 
 
+@router.get("/{slug}/chapters/{chapter_id}/versions", response_model=list[ChapterVersionSummary])
+def list_chapter_versions(slug: str, chapter_id: int, db: Session = Depends(get_session),
+                          user=Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    return chapter_content.list_chapter_versions(db, chapter, user.id)
+
+
+@router.get("/{slug}/chapters/{chapter_id}/versions/{version}", response_model=ChapterVersionDetail)
+def get_chapter_version(slug: str, chapter_id: int, version: int, db: Session = Depends(get_session),
+                        user=Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    return chapter_content.get_chapter_version(db, chapter, user.id, version)
+
+
 @router.get("/{slug}/chapters/{chapter_id}/assignment", response_model=AssignmentResponse)
 def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get_session),
                             user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     chapter = chapter_content.get_chapter(db, course, chapter_id)
     return assignments.get_chapter_assignment(db, chapter, user.id)
+
+
+@router.get("/{slug}/chapters/{chapter_id}/versions/{version}/assignment", response_model=AssignmentResponse)
+def get_chapter_version_assignment(slug: str, chapter_id: int, version: int, db: Session = Depends(get_session),
+                                    user=Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    return assignments.get_chapter_assignment_for_version(db, chapter, user.id, version)
 
 
 @router.post("/{slug}/modules/{module_id}/assignment", response_model=AssignmentResponse, status_code=202)
@@ -98,6 +149,13 @@ def submit_assignment_attempt(slug: str, assignment_id: int, body: SubmitAttempt
                                db: Session = Depends(get_session), user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     return attempts.submit_attempt(db, user.id, course, assignment_id, body)
+
+
+@router.get("/{slug}/assignments/{assignment_id}/attempts", response_model=list[AttemptSummary])
+def list_assignment_attempts(slug: str, assignment_id: int, db: Session = Depends(get_session),
+                             user=Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    return attempts.list_attempts(db, user.id, course, assignment_id)
 
 
 @router.get("/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", response_model=AttemptResponse)

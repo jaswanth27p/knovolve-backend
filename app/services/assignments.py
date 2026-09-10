@@ -1,7 +1,7 @@
 """Assignment fetch-or-dispatch service: chapter/module assignment lookup,
 generation dispatch, and course-scoped assignment resolution for attempts."""
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
@@ -106,19 +106,14 @@ def assignment_belongs_to_course(db: Session, assignment: Assignment, course_id:
     return module is not None and module.course_id == course_id
 
 
-def get_chapter_assignment(db: Session, chapter: Chapter, user_id: int) -> AssignmentResponse:
-    """Fetch-or-dispatch the assignment for whichever chapter-content version
-    is currently relevant to `user_id` — their own latest v2+ remediation if
-    one exists, else the shared global v1 (same precedence as
-    `progression._resolve_relevant_content`, and as the content-streaming
-    route: a learner sent to review a narrow v2 must get ITS assignment, not
-    the original full one, or the remediation loop never closes). 404s if
-    that content isn't ready yet (nothing to base an assignment on);
-    otherwise returns the existing assignment, dispatches generation and
+def _get_or_dispatch_chapter_assignment(db: Session, content: ChapterContent) -> AssignmentResponse:
+    """Shared body of `get_chapter_assignment`/`get_chapter_assignment_for_version`:
+    404s if `content` isn't ready yet (nothing to base an assignment on);
+    otherwise returns the existing assignment for `content` (one per
+    chapter_content_id — see `_chapter_assignment`), dispatches generation and
     re-fetches if missing/failed, or reports "generating" if the dispatched
     task hasn't produced a row yet."""
-    content = _resolve_relevant_content(db, chapter.id, user_id)
-    if content is None or content.status != "ready":
+    if content.status != "ready":
         raise HTTPException(status_code=404, detail="chapter content not ready")
 
     assignment = _chapter_assignment(db, content)
@@ -128,6 +123,44 @@ def get_chapter_assignment(db: Session, chapter: Chapter, user_id: int) -> Assig
     if assignment is None:
         return AssignmentResponse(status="generating")
     return _serialize_assignment(assignment, db)
+
+
+def get_chapter_assignment(db: Session, chapter: Chapter, user_id: int) -> AssignmentResponse:
+    """Fetch-or-dispatch the assignment for whichever chapter-content version
+    is currently relevant to `user_id` — their own latest v2+ remediation if
+    one exists, else the shared global v1 (same precedence as
+    `progression._resolve_relevant_content`, and as the content-streaming
+    route: a learner sent to review a narrow v2 must get ITS assignment, not
+    the original full one, or the remediation loop never closes)."""
+    content = _resolve_relevant_content(db, chapter.id, user_id)
+    if content is None:
+        raise HTTPException(status_code=404, detail="chapter content not ready")
+    return _get_or_dispatch_chapter_assignment(db, content)
+
+
+def get_chapter_assignment_for_version(db: Session, chapter: Chapter, user_id: int, version: int) -> AssignmentResponse:
+    """Fetch-or-dispatch the assignment for one specific past chapter-content
+    version, regardless of which version is currently "relevant" per
+    `get_chapter_assignment`. Lets a learner paging back through old versions
+    (see `chapter_content.get_chapter_version`) reach THAT version's own
+    assignment/attempt history, instead of always being redirected to the
+    latest one — each version has always had its own `Assignment` row (keyed
+    by `chapter_content_id`); this just exposes it. Same visibility rule as
+    `chapter_content.get_chapter_version`: the chapter's shared global row, or
+    this user's own remediation row, never another user's."""
+    content = db.scalar(
+        select(ChapterContent).where(
+            ChapterContent.chapter_id == chapter.id,
+            ChapterContent.version == version,
+            or_(
+                ChapterContent.scope == "global",
+                and_(ChapterContent.scope == "user", ChapterContent.user_id == user_id),
+            ),
+        )
+    )
+    if content is None:
+        raise HTTPException(status_code=404, detail="chapter version not found")
+    return _get_or_dispatch_chapter_assignment(db, content)
 
 
 def _ensure_topup_dispatched(db: Session, assignment: Assignment, user_id: int) -> None:

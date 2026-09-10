@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel
 
 
@@ -25,6 +26,14 @@ class ConceptScore(BaseModel):
     concept_tag: str
     correct: int
     total: int
+
+
+class AttemptSummary(BaseModel):
+    id: int
+    status: str
+    overall_score: float | None = None
+    passed: bool | None = None  # overall_score >= progression.PASS_THRESHOLD; None until graded
+    created_at: datetime
 
 
 class AttemptResponse(BaseModel):

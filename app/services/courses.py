@@ -1,9 +1,9 @@
 """Course catalog service: course generation jobs, dedup, list/fetch courses."""
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import inspect as sa_inspect, select
+from sqlalchemy import func, inspect as sa_inspect, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,7 +16,7 @@ from app.agents.course_creation.nodes.normalize_topic import (
 from app.llm.factory import embed
 from app.models.course import Course, CourseJob, Module, Chapter
 from app.models.enrollment import UserCourse
-from app.schemas.course import CourseJobResponse, PublicCourseResponse
+from app.schemas.course import CourseJobResponse, MyCourseJobResponse, PublicCourseResponse
 from app.services.enrollment import touch_enrollment
 from app.tasks.course_creation_task import run_course_creation_job
 
@@ -122,6 +122,19 @@ def get_next_chapter_id(db: Session, chapter_id: int) -> int | None:
 
 
 def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobResponse:
+    # One in-flight generation per user at a time — the frontend already
+    # blocks the "create" UI while a job is running, so a second job for
+    # this user here would only be reachable by racing/replaying the
+    # request, not normal use.
+    ongoing = db.scalar(
+        select(CourseJob).where(
+            CourseJob.created_by_user_id == user_id,
+            CourseJob.status.in_(["pending", "running"]),
+        )
+    )
+    if ongoing is not None:
+        return CourseJobResponse(status="pending", job_id=ongoing.id)
+
     # Canonicalize + embed ONCE, and dedup on the canonical embedding so
     # semantically-similar-but-differently-worded topics collide correctly.
     canonical = _canonical_topic(topic_raw)
@@ -138,7 +151,8 @@ def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobRes
 
     job = CourseJob(
         topic_slug=_slugify(canonical), topic_raw=topic_raw, topic_embedding=embedding,
-        status="pending", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        status="pending", created_by_user_id=user_id,
+        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
     )
     db.add(job)
     try:
@@ -182,6 +196,44 @@ def get_course_job(db: Session, job_id: int) -> CourseJobResponse:
         if course_row is not None:
             course = serialize_course(db, course_row)
     return CourseJobResponse(status=job.status, job_id=job.id, course=course, error=job.error)
+
+
+# How long a finished (succeeded/failed) job keeps showing up in
+# list_my_course_jobs after it stops being pending/running — long enough for
+# a learner who stepped away mid-generation to come back and see the result,
+# short enough that the list doesn't accumulate months of old noise.
+RECENTLY_FINISHED_WINDOW = timedelta(minutes=15)
+
+
+def list_my_course_jobs(db: Session, user_id: int) -> list[MyCourseJobResponse]:
+    """Jobs this user personally triggered: always includes in-flight ones,
+    plus ones that finished (succeeded/failed) recently. Excludes jobs other
+    users triggered, even if this user later attached to one via dedup — that
+    job still shows up for the caller via its `job_id` (tracked client-side),
+    just not in this "other jobs of mine" list."""
+    cutoff = datetime.now(timezone.utc) - RECENTLY_FINISHED_WINDOW
+    jobs = db.scalars(
+        select(CourseJob)
+        .where(
+            CourseJob.created_by_user_id == user_id,
+            or_(
+                CourseJob.status.in_(["pending", "running"]),
+                CourseJob.updated_at >= cutoff,
+            ),
+        )
+        .order_by(CourseJob.created_at.desc())
+    ).all()
+    result = []
+    for job in jobs:
+        course_slug = None
+        if job.status == "succeeded" and job.course_id:
+            course_row = db.get(Course, job.course_id)
+            course_slug = course_row.topic_slug if course_row is not None else None
+        result.append(MyCourseJobResponse(
+            id=job.id, topic_slug=job.topic_slug, topic_raw=job.topic_raw,
+            status=job.status, error=job.error, course_slug=course_slug, created_at=job.created_at,
+        ))
+    return result
 
 
 def retry_course_job(db: Session, job_id: int) -> CourseJobResponse:
@@ -229,21 +281,34 @@ def retry_course_job(db: Session, job_id: int) -> CourseJobResponse:
     return CourseJobResponse(status="pending", job_id=job.id)
 
 
-def list_public_courses(db: Session, user_id: int) -> list[PublicCourseResponse]:
-    tracked_ids = set(
-        row.course_id for row in db.query(UserCourse).filter_by(user_id=user_id).all()
-    )
-    courses = db.query(Course).order_by(Course.created_at.desc()).all()
+def list_public_courses(
+    db: Session, user_id: int, *,
+    search: str | None = None,
+    sort: str = "date",
+    order: str = "desc",
+    page: int = 1,
+    limit: int = 20,
+) -> tuple[list[PublicCourseResponse], int]:
+    tracked_ids = select(UserCourse.course_id).where(UserCourse.user_id == user_id)
+    query = select(Course).where(Course.id.notin_(tracked_ids))
+    if search:
+        query = query.where(Course.topic_raw.ilike(f"%{search}%"))
+
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+
+    sort_column = Course.topic_raw if sort == "name" else Course.created_at
+    query = query.order_by(sort_column.asc() if order == "asc" else sort_column.desc())
+    query = query.offset((page - 1) * limit).limit(limit)
+
     result = []
-    for course in courses:
-        if course.id in tracked_ids:
-            continue
+    for course in db.scalars(query).all():
         modules = db.query(Module).filter_by(course_id=course.id).all()
         chapter_count = sum(
             db.query(Chapter).filter_by(module_id=m.id).count() for m in modules
         )
         result.append(PublicCourseResponse(
             id=course.id, topic_slug=course.topic_slug, topic_raw=course.topic_raw,
+            created_at=course.created_at,
             module_count=len(modules), chapter_count=chapter_count,
         ))
-    return result
+    return result, total

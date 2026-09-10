@@ -13,6 +13,16 @@ class CourseJobResponse(BaseModel):
     error: str | None = None
 
 
+class MyCourseJobResponse(BaseModel):
+    id: int
+    topic_slug: str
+    topic_raw: str
+    status: str
+    error: str | None = None
+    course_slug: str | None = None
+    created_at: datetime
+
+
 class TrackedCourseResponse(BaseModel):
     id: int
     topic_slug: str
@@ -25,6 +35,14 @@ class TrackedCourseResponse(BaseModel):
     content_ready: bool
     weak_concept_count: int
     strong_concept_count: int
+
+
+class PaginatedTrackedCoursesResponse(BaseModel):
+    items: list[TrackedCourseResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
 
 
 class StreakResponse(BaseModel):
@@ -45,5 +63,36 @@ class PublicCourseResponse(BaseModel):
     id: int
     topic_slug: str
     topic_raw: str
+    created_at: datetime
     module_count: int
     chapter_count: int
+
+
+class PaginatedPublicCoursesResponse(BaseModel):
+    items: list[PublicCourseResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+
+
+class ChapterVersionSummary(BaseModel):
+    version: int
+    status: str
+    created_at: datetime
+    remediation_target_tags: list[str] | None = None
+
+
+class ChapterContentSectionResponse(BaseModel):
+    order: int
+    heading: str
+    kind: str
+    body_markdown: str
+    examples: list[dict]
+    diagram_status: str | None = None
+    diagram_image_url: str | None = None
+
+
+class ChapterVersionDetail(ChapterVersionSummary):
+    error: str | None = None
+    sections: list[ChapterContentSectionResponse]

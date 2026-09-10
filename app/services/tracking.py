@@ -1,5 +1,6 @@
 """Tracking service: a learner's enrolled/tracked courses and dashboard."""
 from fastapi import HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.chapter_content import ChapterContent
@@ -38,9 +39,36 @@ def _serialize_tracked(db: Session, uc: UserCourse) -> TrackedCourseResponse:
     )
 
 
-def list_my_courses(db: Session, user_id: int) -> list[TrackedCourseResponse]:
-    rows = db.query(UserCourse).filter_by(user_id=user_id).order_by(UserCourse.last_opened_at.desc()).all()
-    return [_serialize_tracked(db, uc) for uc in rows]
+def list_my_courses(
+    db: Session, user_id: int, *,
+    search: str | None = None,
+    status: str | None = None,
+    sort: str = "date",
+    order: str = "desc",
+    page: int = 1,
+    limit: int = 20,
+) -> tuple[list[TrackedCourseResponse], int]:
+    query = select(UserCourse).join(Course, Course.id == UserCourse.course_id).where(
+        UserCourse.user_id == user_id
+    )
+    if status:
+        query = query.where(UserCourse.status == status)
+    if search:
+        query = query.where(Course.topic_raw.ilike(f"%{search}%"))
+
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+
+    if sort == "name":
+        sort_column = Course.topic_raw
+    elif sort == "progress":
+        sort_column = UserCourse.progress
+    else:
+        sort_column = UserCourse.last_opened_at
+    query = query.order_by(sort_column.asc() if order == "asc" else sort_column.desc())
+    query = query.offset((page - 1) * limit).limit(limit)
+
+    rows = db.scalars(query).all()
+    return [_serialize_tracked(db, uc) for uc in rows], total
 
 
 def get_dashboard(db: Session, user_id: int) -> DashboardResponse:
