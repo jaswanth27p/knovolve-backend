@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     # JSON list in .env, e.g. CORS_ORIGINS=["http://localhost:3000"]
     cors_origins: list[str] = ["http://localhost:3000"]
+    # Base URL the frontend is served from — used to build clickable
+    # course_url links in chat-agent tool responses.
+    frontend_url: str = "http://localhost:3000"
     # Minimum cosine similarity for a Course/CourseJob to count as an existing
     # version of a requested topic (dedup).
     topic_similarity_threshold: float = 0.85
