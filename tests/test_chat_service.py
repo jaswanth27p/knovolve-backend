@@ -1,143 +1,118 @@
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+from langchain_core.messages import AIMessage
 
 from app.db import SessionLocal
-from app.models.assignment import Assignment
-from app.models.attempt import AssignmentAttempt
-from app.models.chapter_content import ChapterContent
-from app.models.course import Chapter, Course, Module
-from app.models.user import User
-from app.schemas.course import DashboardResponse, StreakResponse
+from app.schemas.chat import ChatRequest, ChatTurn
 from app.services import chat
 
 
-def _now():
-    return datetime.now(timezone.utc)
+def _bound_model(responses: list[AIMessage]):
+    """A MagicMock standing in for `ChatOpenAI.bind_tools(...)`: .invoke()
+    returns the next response in `responses` each call; .bind_tools()
+    returns itself so `get_chat_model(...).bind_tools(tools)` chains through."""
+    model = MagicMock()
+    model.bind_tools.return_value = model
+    model.invoke.side_effect = responses
+    return model
 
 
-def _make_chapter_with_assignment(db, slug: str):
-    course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=_now())
-    db.add(course); db.flush()
-    module = Module(course_id=course.id, title="M", objective="o", order=1)
-    db.add(module); db.flush()
-    chapter = Chapter(module_id=module.id, title="C1", objective="o", order=1)
-    db.add(chapter); db.flush()
-    content = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
-                              outline=[], created_at=_now(), updated_at=_now())
-    db.add(content); db.flush()
-    assignment = Assignment(level="chapter", chapter_content_id=content.id, scope="global",
-                             status="ready", created_at=_now(), updated_at=_now())
-    db.add(assignment); db.flush()
-    return course, chapter, assignment
-
-
-def test_progress_question_routes_to_progress_tool():
-    with patch("app.services.chat.get_dashboard", return_value=DashboardResponse(
-        in_progress=[], completed=[], in_progress_count=1, completed_count=0, total_count=1,
-        streak=StreakResponse(current=0, longest=0),
-    )):
-        with SessionLocal() as db:
-            answer = chat.answer_chat_message(db, user_id=1, course_slug=None, chapter_id=None,
-                                                message="what's my progress")
-    assert "1" in answer
-
-
-def test_result_question_without_chapter_context_asks_for_context():
+def test_answer_returns_bundle_only_when_request_had_none(monkeypatch):
+    model = _bound_model([AIMessage(content="You're doing great!")])
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
     with SessionLocal() as db:
-        answer = chat.answer_chat_message(db, user_id=1, course_slug="x", chapter_id=None,
-                                            message="why did I get that wrong")
-    assert "open a chapter" in answer.lower() or "which chapter" in answer.lower()
+        response_with_none = chat.answer_chat_message(db, user_id=1, req=ChatRequest(message="hi"))
+    assert response_with_none.context is not None
 
-
-def test_result_question_with_no_attempt_yet():
+    model2 = _bound_model([AIMessage(content="Still great!")])
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model2)
     with SessionLocal() as db:
-        _, chapter, _ = _make_chapter_with_assignment(db, "chat-result-a")
-        db.commit()
-        chapter_id = chapter.id
-
-    with SessionLocal() as db:
-        answer = chat.answer_chat_message(db, user_id=999, course_slug="chat-result-a", chapter_id=chapter_id,
-                                            message="what did I get wrong")
-    assert "haven't completed" in answer.lower()
+        response_with_context = chat.answer_chat_message(
+            db, user_id=1,
+            req=ChatRequest(message="hi again", context=response_with_none.context),
+        )
+    assert response_with_context.context is None
 
 
-def test_result_question_reports_latest_graded_attempt():
-    with SessionLocal() as db:
-        _, chapter, assignment = _make_chapter_with_assignment(db, "chat-result-b")
-        user = User(email="chat-result-b@example.com", password_hash="x")
-        db.add(user); db.flush()
-        db.add(AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="graded",
-                                  overall_score=0.85, created_at=_now(), updated_at=_now()))
-        db.commit()
-        chapter_id, user_id = chapter.id, user.id
+def test_answer_executes_tool_call_then_returns_final_reply(monkeypatch):
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "get_user_stats", "args": {}, "id": "call-1", "type": "tool_call"}],
+    )
+    final_response = AIMessage(content="You've done 1 assignment today.")
+    model = _bound_model([tool_call_response, final_response])
+
+    fake_tool = MagicMock()
+    fake_tool.name = "get_user_stats"
+    fake_tool.invoke.return_value = {"assignments_attempted_today": 1}
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [fake_tool])
 
     with SessionLocal() as db:
-        answer = chat.answer_chat_message(db, user_id=user_id, course_slug="chat-result-b", chapter_id=chapter_id,
-                                            message="what was my score")
-    assert "85%" in answer
-    assert "passed" in answer.lower()
+        response = chat.answer_chat_message(db, user_id=1, req=ChatRequest(message="how many assignments today?"))
+
+    fake_tool.invoke.assert_called_once_with({})
+    assert response.reply == "You've done 1 assignment today."
 
 
-def test_freeform_question_calls_llm_grounded_in_context():
-    """A message that matches none of the fixed keyword shapes must not fall
-    back to a canned string — it goes to the LLM with real learner context."""
-    mock_model = MagicMock()
-    mock_model.invoke.return_value = MagicMock(content="You're doing great, keep going!")
-    with patch("app.services.chat.get_dashboard", return_value=DashboardResponse(
-        in_progress=[], completed=[], in_progress_count=2, completed_count=1, total_count=3,
-        streak=StreakResponse(current=3, longest=5),
-    )), patch("app.services.chat.get_chat_model", return_value=mock_model):
-        with SessionLocal() as db:
-            answer = chat.answer_chat_message(db, user_id=1, course_slug=None, chapter_id=None,
-                                                message="any study tips for today?")
+def test_answer_turns_tool_error_into_tool_message_not_a_crash(monkeypatch):
+    from app.services.chat_tools._errors import ChatToolError
 
-    assert answer == "You're doing great, keep going!"
-    mock_model.invoke.assert_called_once()
-    # The prompt sent to the LLM must be grounded in the real dashboard data,
-    # not a hardcoded placeholder.
-    messages = mock_model.invoke.call_args.args[0]
-    system_content = messages[0].content
-    assert "3 day(s)" in system_content
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "get_chapter_progress", "args": {"course_slug": "x", "chapter_id": 1},
+                      "id": "call-1", "type": "tool_call"}],
+    )
+    final_response = AIMessage(content="You haven't started that course yet.")
+    model = _bound_model([tool_call_response, final_response])
+
+    failing_tool = MagicMock()
+    failing_tool.name = "get_chapter_progress"
+    failing_tool.invoke.side_effect = ChatToolError("You haven't started the course 'X' yet.")
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [failing_tool])
+
+    with SessionLocal() as db:
+        response = chat.answer_chat_message(
+            db, user_id=1, req=ChatRequest(message="am I done with chapter 1?"),
+        )
+    assert response.reply == "You haven't started that course yet."
 
 
-def test_stream_deterministic_reply_yields_single_token_then_done():
-    with patch("app.services.chat.get_dashboard", return_value=DashboardResponse(
-        in_progress=[], completed=[], in_progress_count=1, completed_count=0, total_count=1,
-        streak=StreakResponse(current=0, longest=0),
-    )):
-        with SessionLocal() as db:
-            events = list(chat.stream_chat_message(db, user_id=1, course_slug=None, chapter_id=None,
-                                                     message="what's my progress"))
+def test_stream_yields_context_event_on_first_turn_only(monkeypatch):
+    final = AIMessage(content="ok")
+    model = _bound_model([final])
+    model.stream.return_value = [MagicMock(content="ok")]
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="hi")))
+    assert events[0]["type"] == "context"
+    assert "in_progress_count" in events[0]["bundle"]
     assert events[-1] == {"type": "done"}
+
+
+def test_stream_omits_context_event_when_request_already_has_one(monkeypatch):
+    final = AIMessage(content="ok again")
+    model = _bound_model([final])
+    model.stream.return_value = [MagicMock(content="ok again")]
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
+
+    with SessionLocal() as db:
+        bundle = chat.answer_chat_message(db, user_id=1, req=ChatRequest(message="hi")).context
+    assert bundle is not None
+
+    model2 = _bound_model([AIMessage(content="ok again")])
+    model2.stream.return_value = [MagicMock(content="ok again")]
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model2)
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(
+            db, user_id=1,
+            req=ChatRequest(message="hi again", context=bundle, history=[ChatTurn(role="user", content="hi")]),
+        ))
     assert events[0]["type"] == "token"
-    assert "1" in events[0]["text"]
-
-
-def test_stream_freeform_reply_yields_one_token_event_per_chunk():
-    mock_model = MagicMock()
-    mock_model.stream.return_value = [MagicMock(content="You're "), MagicMock(content="doing great!")]
-    with patch("app.services.chat.get_dashboard", return_value=DashboardResponse(
-        in_progress=[], completed=[], in_progress_count=2, completed_count=1, total_count=3,
-        streak=StreakResponse(current=3, longest=5),
-    )), patch("app.services.chat.get_chat_model", return_value=mock_model):
-        with SessionLocal() as db:
-            events = list(chat.stream_chat_message(db, user_id=1, course_slug=None, chapter_id=None,
-                                                     message="any study tips for today?"))
-    assert events == [
-        {"type": "token", "text": "You're "},
-        {"type": "token", "text": "doing great!"},
-        {"type": "done"},
-    ]
-
-
-def test_stream_freeform_reply_yields_error_event_on_llm_failure():
-    mock_model = MagicMock()
-    mock_model.stream.side_effect = RuntimeError("boom")
-    with patch("app.services.chat.get_dashboard", return_value=DashboardResponse(
-        in_progress=[], completed=[], in_progress_count=0, completed_count=0, total_count=0,
-        streak=StreakResponse(current=0, longest=0),
-    )), patch("app.services.chat.get_chat_model", return_value=mock_model):
-        with SessionLocal() as db:
-            events = list(chat.stream_chat_message(db, user_id=1, course_slug=None, chapter_id=None,
-                                                     message="any study tips for today?"))
-    assert events == [{"type": "error", "message": "Failed to generate a reply. Please try again."}]
+    assert events[-1] == {"type": "done"}
