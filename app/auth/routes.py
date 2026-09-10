@@ -46,12 +46,12 @@ def _set_auth_cookies(response: Response, access_token: str, refresh_token: str)
     response.set_cookie(
         ACCESS_COOKIE, access_token,
         max_age=settings.jwt_access_ttl_minutes * 60,
-        httponly=True, secure=True, samesite="strict", path="/",
+        httponly=True, secure=True, samesite=settings.cookie_samesite, path="/",
     )
     response.set_cookie(
         REFRESH_COOKIE, refresh_token,
         max_age=settings.jwt_refresh_ttl_days * 24 * 60 * 60,
-        httponly=True, secure=True, samesite="strict", path="/auth",
+        httponly=True, secure=True, samesite=settings.cookie_samesite, path="/auth",
     )
 
 

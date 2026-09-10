@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
@@ -24,6 +26,13 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     # JSON list in .env, e.g. CORS_ORIGINS=["http://localhost:3000"]
     cors_origins: list[str] = ["http://localhost:3000"]
+    # SameSite policy for the auth cookies. "strict" is the secure default for
+    # same-origin dev; set "none" in production when the frontend is served
+    # from a different origin than the API (e.g. Next.js on Vercel, API on
+    # Render/Railway/Fly) — SameSite=Strict cookies are never attached to the
+    # cross-site API calls, silently breaking auth. "none" requires the
+    # cookies to also be Secure (they are) and is only safe over HTTPS.
+    cookie_samesite: Literal["lax", "strict", "none"] = "strict"
     # Base URL the frontend is served from — used to build clickable
     # course_url links in chat-agent tool responses.
     frontend_url: str = "http://localhost:3000"
