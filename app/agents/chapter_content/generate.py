@@ -36,26 +36,37 @@ def _section_event(section: ChapterContentSection) -> dict:
     }
 
 
-def _get_or_create_content(chapter_id: int, db: Session) -> ChapterContent:
+def _get_or_create_content(db: Session, chapter: Chapter) -> ChapterContent:
+    """Base content row for `chapter`, at the chapter's scope: global chapters
+    get scope="global"; extension chapters get scope="user" owned by their
+    user_id. Created on first open."""
+    scope = chapter.scope
+    user_id = chapter.user_id if scope == "user" else None
     content = db.scalar(
-        select(ChapterContent).where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "global")
+        select(ChapterContent).where(
+            ChapterContent.chapter_id == chapter.id,
+            ChapterContent.scope == scope,
+            ChapterContent.remediation_source_attempt_id.is_(None),
+            *([ChapterContent.user_id == user_id] if scope == "user" else []),
+        )
     )
     if content is not None:
         return content
     now = datetime.now(timezone.utc)
-    content = ChapterContent(chapter_id=chapter_id, version=1, scope="global", status="generating",
-                              outline=[], created_at=now, updated_at=now)
+    content = ChapterContent(chapter_id=chapter.id, version=1, scope=scope, user_id=user_id,
+                             status="generating", outline=[], created_at=now, updated_at=now)
     db.add(content)
     try:
         db.commit()
     except IntegrityError:
-        # Two concurrent opens of an ungenerated chapter can both pass the
-        # select above; the partial unique index (chapter_id, version) for
-        # scope="global" lets exactly one insert win. The loser adopts the
-        # winner's row rather than 500-ing the request.
         db.rollback()
         winner = db.scalar(
-            select(ChapterContent).where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "global")
+            select(ChapterContent).where(
+                ChapterContent.chapter_id == chapter.id,
+                ChapterContent.scope == scope,
+                ChapterContent.remediation_source_attempt_id.is_(None),
+                *([ChapterContent.user_id == user_id] if scope == "user" else []),
+            )
         )
         if winner is None:
             raise
@@ -64,27 +75,23 @@ def _get_or_create_content(chapter_id: int, db: Session) -> ChapterContent:
     return content
 
 
-def _resolve_content_for_user(chapter_id: int, user_id: int, db: Session) -> ChapterContent:
-    """Same precedence as `progression._resolve_relevant_content`: this
-    user's own latest remediation (scope="user") version if one exists,
-    else the chapter's shared scope="global" version — created on first
-    open if it doesn't exist yet. Kept as a separate lookup (not a straight
-    import of the private helper) because this one must also fall through to
-    `_get_or_create_content`'s create-on-first-open behavior, which
-    `progression`'s read-only helper deliberately doesn't do."""
+def _resolve_content_for_user(db: Session, chapter: Chapter, user_id: int) -> ChapterContent:
+    """This user's own latest remediation version if one exists, else the
+    chapter's base content (created on first open)."""
     user_content = db.scalar(
         select(ChapterContent)
-        .where(ChapterContent.chapter_id == chapter_id, ChapterContent.scope == "user", ChapterContent.user_id == user_id)
+        .where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "user",
+               ChapterContent.user_id == user_id)
         .order_by(ChapterContent.version.desc())
         .limit(1)
     )
     if user_content is not None:
         return user_content
-    return _get_or_create_content(chapter_id, db)
+    return _get_or_create_content(db, chapter)
 
 
 def stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Iterator[dict]:
-    content = _resolve_content_for_user(chapter.id, user_id, db)
+    content = _resolve_content_for_user(db, chapter, user_id)
 
     existing = (
         db.query(ChapterContentSection)
@@ -99,7 +106,7 @@ def stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Itera
         yield {"type": "done"}
         return
 
-    if content.scope == "user":
+    if content.remediation_source_attempt_id is not None:
         # A remediation (V2+) version is authored exclusively by the
         # background `remediate_chapter_task` (dispatched at grading time,
         # see app.agents.evaluation.grade), using the narrow

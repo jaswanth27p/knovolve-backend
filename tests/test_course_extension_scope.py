@@ -61,6 +61,25 @@ def test_get_module_visible_to_owner_only():
         db.rollback()
 
 
+def _make_bucket_course():
+    course = _make_course()
+    with SessionLocal() as db:
+        added = append_chapters(db, 5, course, [{"title": "ExtC", "objective": "o"}])
+        db.commit()
+        return course, added[0]["chapter_id"]
+
+
+def test_get_chapter_rejects_foreign_extension_chapter():
+    course, cid = _make_bucket_course()
+    from app.services import chapter_content
+    from fastapi import HTTPException
+    with SessionLocal() as db:
+        assert chapter_content.get_chapter(db, course, cid, user_id=5).id == cid
+        with pytest.raises(HTTPException):
+            chapter_content.get_chapter(db, course, cid, user_id=6)
+        db.rollback()
+
+
 def test_next_chapter_ends_after_bucket():
     course = _make_course()
     with SessionLocal() as db:

@@ -81,7 +81,7 @@ def get_course(slug: str, db: Session = Depends(get_session), user=Depends(get_c
 def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_session),
                         user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    chapter = chapter_content.get_chapter(db, course, chapter_id, user.id)
     touch_enrollment(db, user.id, course)
 
     def _encode(events: Iterator[dict]) -> Iterator[str]:
@@ -98,7 +98,7 @@ def get_chapter_content(slug: str, chapter_id: int, db: Session = Depends(get_se
 def list_chapter_versions(slug: str, chapter_id: int, db: Session = Depends(get_session),
                           user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    chapter = chapter_content.get_chapter(db, course, chapter_id, user.id)
     return chapter_content.list_chapter_versions(db, chapter, user.id)
 
 
@@ -106,7 +106,7 @@ def list_chapter_versions(slug: str, chapter_id: int, db: Session = Depends(get_
 def get_chapter_version(slug: str, chapter_id: int, version: int, db: Session = Depends(get_session),
                         user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    chapter = chapter_content.get_chapter(db, course, chapter_id, user.id)
     return chapter_content.get_chapter_version(db, chapter, user.id, version)
 
 
@@ -114,7 +114,7 @@ def get_chapter_version(slug: str, chapter_id: int, version: int, db: Session = 
 def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get_session),
                             user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    chapter = chapter_content.get_chapter(db, course, chapter_id, user.id)
     return assignments.get_chapter_assignment(db, chapter, user.id)
 
 
@@ -122,7 +122,7 @@ def get_chapter_assignment(slug: str, chapter_id: int, db: Session = Depends(get
 def get_chapter_version_assignment(slug: str, chapter_id: int, version: int, db: Session = Depends(get_session),
                                     user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    chapter = chapter_content.get_chapter(db, course, chapter_id)
+    chapter = chapter_content.get_chapter(db, course, chapter_id, user.id)
     return assignments.get_chapter_assignment_for_version(db, chapter, user.id, version)
 
 

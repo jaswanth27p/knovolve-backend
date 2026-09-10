@@ -3,6 +3,9 @@ from unittest.mock import patch
 from app.db import SessionLocal
 from app.models.course import Course, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
+from app.models.user import User
+from app.models.assignment import Assignment
+from app.models.attempt import AssignmentAttempt
 from app.agents.chapter_content.generate import stream_chapter_content
 from app.agents.chapter_content.nodes.generate_section_outline import SectionOutlineDraft
 from app.agents.chapter_content.nodes.generate_chapter_section import ChapterSectionResponse, ExampleDraft
@@ -133,6 +136,93 @@ def test_generation_failure_marks_content_failed_and_yields_error():
         content = db.query(ChapterContent).filter_by(chapter_id=chapter.id).one()
         assert content.status == "failed"
         assert content.error == "llm down"
+
+
+def _make_extension_chapter(topic_slug: str) -> Chapter:
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        course = Course(topic_slug=topic_slug, topic_raw=topic_slug, topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.flush()
+        user = User(email=f"{topic_slug}@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        module = Module(course_id=course.id, title="Additional Chapters", objective="o", order=2,
+                        scope="user", user_id=user.id)
+        db.add(module)
+        db.flush()
+        chapter = Chapter(module_id=module.id, title="Ext Functions", objective="Extend the course",
+                          order=1, scope="user", user_id=user.id)
+        db.add(chapter)
+        db.commit()
+        db.refresh(chapter)
+        return chapter
+
+
+def test_extension_chapter_generates_user_scoped_base_content():
+    chapter = _make_extension_chapter("stream-cc-extension")
+    outline = [SectionOutlineDraft(heading="Intro", objective="o1", kind="intro", order=1)]
+    section_response = ChapterSectionResponse(body_markdown="ext body", examples=[], diagram_spec=None)
+
+    assert chapter.user_id is not None
+    with SessionLocal() as db, \
+         patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline) as mock_outline, \
+         patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=section_response) as mock_section, \
+         patch("app.agents.chapter_content.generate.generate_chapter_assignment_task"):
+        events = list(stream_chapter_content(chapter, db, user_id=chapter.user_id))
+
+    mock_outline.assert_called_once()
+    mock_section.assert_called_once()
+    section_events = [e for e in events if e["type"] == "section_ready"]
+    assert [e["body_markdown"] for e in section_events] == ["ext body"]
+    assert events[-1]["type"] == "done"
+
+    with SessionLocal() as db:
+        content = db.query(ChapterContent).filter_by(chapter_id=chapter.id).one()
+        assert content.scope == "user"
+        assert content.user_id == chapter.user_id
+        assert content.status == "ready"
+        sections = db.query(ChapterContentSection).filter_by(chapter_content_id=content.id).all()
+        assert len(sections) == 1
+        assert sections[0].body_markdown == "ext body"
+
+
+def test_remediation_content_is_not_generated_inline():
+    chapter = _make_chapter("stream-cc-remediation-gate")
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        user = User(email="remediation-gate@example.com", password_hash="x")
+        db.add(user)
+        db.flush()
+        base = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
+                              outline=[], created_at=now, updated_at=now)
+        db.add(base)
+        db.flush()
+        assignment = Assignment(level="chapter", chapter_content_id=base.id, scope="global",
+                                status="ready", created_at=now, updated_at=now)
+        db.add(assignment)
+        db.flush()
+        attempt = AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="graded",
+                                    overall_score=0.5, created_at=now, updated_at=now)
+        db.add(attempt)
+        db.flush()
+        remediation = ChapterContent(chapter_id=chapter.id, version=2, scope="user", user_id=user.id,
+                                      status="generating", outline=[], remediation_target_tags=["t"],
+                                      remediation_source_attempt_id=attempt.id,
+                                      created_at=now, updated_at=now)
+        db.add(remediation)
+        db.commit()
+        user_id = user.id
+
+    with SessionLocal() as db, \
+         patch("app.agents.chapter_content.generate.generate_section_outline") as mock_outline, \
+         patch("app.agents.chapter_content.generate.generate_chapter_section") as mock_section:
+        events = list(stream_chapter_content(chapter, db, user_id=user_id))
+
+    mock_outline.assert_not_called()
+    mock_section.assert_not_called()
+    assert {"type": "generating"} in events
+    assert events[-1]["type"] == "done"
 
 
 def test_replaying_already_ready_content_does_not_redispatch_assignment():

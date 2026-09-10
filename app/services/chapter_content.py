@@ -17,13 +17,16 @@ from app.realtime.chapter_content_events import channel_name
 from app.schemas.course import ChapterContentSectionResponse, ChapterVersionDetail, ChapterVersionSummary
 
 
-def get_chapter(db: Session, course: Course, chapter_id: int) -> Chapter:
-    chapter = (
-        db.query(Chapter)
-        .join(Module, Chapter.module_id == Module.id)
-        .filter(Chapter.id == chapter_id, Module.course_id == course.id)
-        .first()
+def get_chapter(db: Session, course: Course, chapter_id: int, user_id: int | None = None) -> Chapter:
+    base = db.query(Chapter).join(Module, Chapter.module_id == Module.id).filter(
+        Chapter.id == chapter_id, Module.course_id == course.id,
     )
+    if user_id is None:
+        base = base.filter(Module.scope == "global")
+    else:
+        base = base.filter(or_(Module.scope == "global",
+                               and_(Module.scope == "user", Module.user_id == user_id)))
+    chapter = base.first()
     if not chapter:
         raise HTTPException(status_code=404, detail="chapter not found")
     return chapter
@@ -110,7 +113,12 @@ def stream_content_events(chapter: Chapter, db: Session, user_id: int) -> Iterat
         # next open's DB replay — blocking up to the timeout to hear about
         # them would only delay surfacing the error to the user.
         content = db.scalar(
-            select(ChapterContent).where(ChapterContent.chapter_id == chapter.id, ChapterContent.scope == "global")
+            select(ChapterContent).where(
+                ChapterContent.chapter_id == chapter.id,
+                ChapterContent.scope == ("user" if chapter.scope == "user" else "global"),
+                ChapterContent.remediation_source_attempt_id.is_(None),
+                *([ChapterContent.user_id == chapter.user_id] if chapter.scope == "user" else []),
+            )
         )
         if content is not None:
             yield from _tail_pending_diagrams(db, content.id, pending_orders)
