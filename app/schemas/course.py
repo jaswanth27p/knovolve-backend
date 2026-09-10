@@ -50,6 +50,16 @@ class StreakResponse(BaseModel):
     longest: int
 
 
+class ActivityEvent(BaseModel):
+    at: datetime          # tz-aware UTC
+    score: float          # overall_score, 0.0-1.0 (graded rows always have one)
+    passed: bool          # score >= progression.PASS_THRESHOLD
+
+class ActivityResponse(BaseModel):
+    days: int             # requested window (default 14)
+    events: list[ActivityEvent]
+
+
 class DashboardResponse(BaseModel):
     in_progress: list[TrackedCourseResponse]
     completed: list[TrackedCourseResponse]
