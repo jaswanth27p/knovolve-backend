@@ -5,6 +5,7 @@ from app.db import SessionLocal
 from app.models.user import User
 from app.models.refresh_token import RefreshToken
 from app.models.course import Course, CourseJob, Module, Chapter, Concept, ConceptEdge
+from app.models.course_extension import CourseExtensionJob
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.enrollment import UserCourse
 from app.models.assignment import Assignment, AssignmentQuestion
@@ -39,7 +40,7 @@ def clean_db():
         s.execute(text(
             "TRUNCATE refresh_tokens, learner_streaks, users, assignment_answers, assignment_attempts, "
             "assignment_questions, assignment_user_topups, assignments, chapter_content_sections, chapter_contents, "
-            "concept_edges, concepts, chapters, modules, course_jobs, courses, user_courses, "
+            "concept_edges, concepts, chapters, modules, course_jobs, course_extension_jobs, courses, user_courses, "
             "checkpoint_writes, checkpoint_blobs, checkpoints RESTART IDENTITY CASCADE"
         ))
         s.commit()

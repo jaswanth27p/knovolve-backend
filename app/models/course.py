@@ -57,6 +57,17 @@ class Module(Base):
     title: Mapped[str] = mapped_column(String(255))
     objective: Mapped[str] = mapped_column(Text)
     order: Mapped[int] = mapped_column(Integer)
+    scope: Mapped[str] = mapped_column(String(16), default="global")  # "global" | "user"
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+
+    __table_args__ = (
+        Index(
+            "ix_modules_one_user_bucket_per_course",
+            "course_id", "user_id",
+            unique=True,
+            postgresql_where=(scope == "user"),
+        ),
+    )
 
 
 class Chapter(Base):
@@ -66,6 +77,8 @@ class Chapter(Base):
     title: Mapped[str] = mapped_column(String(255))
     objective: Mapped[str] = mapped_column(Text)
     order: Mapped[int] = mapped_column(Integer)
+    scope: Mapped[str] = mapped_column(String(16), default="global")
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
 
 
 class Concept(Base):

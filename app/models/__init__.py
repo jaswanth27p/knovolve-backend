@@ -10,6 +10,7 @@ Assignment.user_id's FK to "users" fails to resolve).
 from app.models.user import User
 from app.models.refresh_token import RefreshToken
 from app.models.course import Course, CourseJob, Module, Chapter, Concept, ConceptEdge
+from app.models.course_extension import CourseExtensionJob
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
@@ -21,6 +22,7 @@ __all__ = [
     "RefreshToken",
     "Course",
     "CourseJob",
+    "CourseExtensionJob",
     "Module",
     "Chapter",
     "Concept",
