@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -189,3 +189,70 @@ def test_get_chapter_assignment_rejects_other_users_remediation_version():
     with SessionLocal() as db:
         with pytest.raises(ChatToolError):
             assignment_tools.get_chapter_assignment(db, owner_id, slug, chapter_id, version=2)
+
+
+def test_get_recent_assignment_attempts_returns_own_across_courses_with_context():
+    with SessionLocal() as db:
+        user = User(email="at-d@example.com", password_hash="x")
+        other = User(email="at-e@example.com", password_hash="x")
+        db.add_all([user, other]); db.flush()
+        course_b, _ch_b, _c_b, assign_b = _make_started_assignment(db, "at-course-b2", user.id)
+        attempt_b = AssignmentAttempt(assignment_id=assign_b.id, user_id=user.id, status="graded",
+                                      overall_score=0.8, created_at=_now(), updated_at=_now())
+        db.add(attempt_b)
+        attempt_other = AssignmentAttempt(assignment_id=assign_b.id, user_id=other.id, status="graded",
+                                          overall_score=1.0, created_at=_now(), updated_at=_now())
+        db.add(attempt_other)
+        db.flush()
+        db.commit()
+        user_id = user.id
+        slug_b, ch_id_b, attempt_b_id = course_b.topic_slug, _ch_b.id, attempt_b.id
+
+    with SessionLocal() as db:
+        result = assignment_tools.get_recent_assignment_attempts(db, user_id, limit=5)
+    assert len(result) == 1
+    assert result[0]["attempt_id"] == attempt_b_id
+    assert result[0]["course_slug"] == slug_b
+    assert result[0]["course_title"] == slug_b
+    assert result[0]["level"] == "chapter"
+    assert result[0]["chapter_id"] == ch_id_b
+    assert result[0]["content_version"] == 1
+    assert result[0]["overall_score"] == 0.8
+
+
+def test_get_recent_assignment_attempts_orders_newest_first():
+    with SessionLocal() as db:
+        user = User(email="at-f@example.com", password_hash="x")
+        db.add(user); db.flush()
+        course, _ch, _c, assign = _make_started_assignment(db, "at-course-f", user.id)
+        t0 = _now()
+        old = AssignmentAttempt(assignment_id=assign.id, user_id=user.id, status="graded",
+                                overall_score=0.4, created_at=t0, updated_at=t0)
+        db.add(old); db.flush()
+        t1 = t0 + timedelta(seconds=1)
+        new = AssignmentAttempt(assignment_id=assign.id, user_id=user.id, status="graded",
+                                overall_score=0.9, created_at=t1, updated_at=t1)
+        db.add(new);         db.flush()
+        db.commit()
+        user_id = user.id
+        new_id, old_id = new.id, old.id
+
+    with SessionLocal() as db:
+        result = assignment_tools.get_recent_assignment_attempts(db, user_id, limit=5)
+    assert [r["attempt_id"] for r in result] == [new_id, old_id]
+
+
+def test_get_recent_assignment_attempts_caps_limit_at_ten():
+    with SessionLocal() as db:
+        user = User(email="at-g@example.com", password_hash="x")
+        db.add(user); db.flush()
+        _course, _ch, _c, assign = _make_started_assignment(db, "at-course-g", user.id)
+        for i in range(12):
+            db.add(AssignmentAttempt(assignment_id=assign.id, user_id=user.id, status="graded",
+                                     overall_score=i / 12, created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id = user.id
+
+    with SessionLocal() as db:
+        result = assignment_tools.get_recent_assignment_attempts(db, user_id, limit=100)
+    assert len(result) == 10

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAnswer, AssignmentAttempt
 from app.models.chapter_content import ChapterContent
-from app.models.course import Course
+from app.models.course import Chapter, Course
 from app.services import progression
 from app.services.chapter_content import _visible_to_user
 from app.services.chat_tools._authz import require_started, require_started_course
@@ -145,4 +145,42 @@ def get_chapter_assignment(
          "concept_tag": q.concept_tag, "difficulty": q.difficulty}
         for q in questions
     ]
+    return result
+
+
+def get_recent_assignment_attempts(db: Session, user_id: int, limit: int = 5) -> list[dict]:
+    capped = max(1, min(limit, 10))
+    attempts = db.scalars(
+        select(AssignmentAttempt)
+        .where(AssignmentAttempt.user_id == user_id)
+        .order_by(AssignmentAttempt.created_at.desc())
+        .limit(capped)
+    ).all()
+    result: list[dict] = []
+    for attempt in attempts:
+        item = {
+            "attempt_id": attempt.id, "assignment_id": attempt.assignment_id,
+            "status": attempt.status, "overall_score": attempt.overall_score,
+            "created_at": attempt.created_at.isoformat(),
+            "course_slug": None, "course_title": None, "level": None,
+            "chapter_id": None, "chapter_title": None, "content_version": None,
+        }
+        assignment = db.get(Assignment, attempt.assignment_id)
+        if assignment is not None:
+            item["level"] = assignment.level
+            course_id = progression.resolve_course_id(db, assignment)
+            if course_id is not None:
+                course = db.get(Course, course_id)
+                if course is not None:
+                    item["course_slug"] = course.topic_slug
+                    item["course_title"] = course.topic_raw
+            if assignment.level == "chapter" and assignment.chapter_content_id is not None:
+                content = db.get(ChapterContent, assignment.chapter_content_id)
+                if content is not None:
+                    item["content_version"] = content.version
+                    chapter = db.get(Chapter, content.chapter_id)
+                    if chapter is not None:
+                        item["chapter_id"] = chapter.id
+                        item["chapter_title"] = chapter.title
+        result.append(item)
     return result
