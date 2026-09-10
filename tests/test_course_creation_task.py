@@ -147,6 +147,40 @@ def test_already_succeeded_job_is_skipped():
         assert job.course_id == course_id
 
 
+def test_force_job_seeds_allow_duplicate_into_state():
+    """allow_duplicate flow: a force-created job must tell the graph to skip
+    semantic dedup so the requested course is actually built."""
+    with SessionLocal() as db:
+        job = CourseJob(topic_slug="celery-force-topic", topic_raw="Force Topic",
+                          topic_embedding=[1.0] + [0.0] * 2047, status="pending",
+                          allow_duplicate=True,
+                          created_at=datetime.now(timezone.utc),
+                          updated_at=datetime.now(timezone.utc))
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+
+    with SessionLocal() as db:
+        db.add(Course(topic_slug="celery-force-existing", topic_raw="Existing",
+                       topic_embedding=[0.0] * 2048,
+                       created_at=datetime.now(timezone.utc)))
+        db.commit()
+        course_id = db.query(Course).filter_by(topic_slug="celery-force-existing").one().id
+
+    with patch("app.tasks.course_creation_task.build_course_creation_graph") as mock_build:
+        mock_build.return_value.get_state.return_value = MagicMock(next=None)
+        mock_build.return_value.invoke.return_value = {"error": None, "existing_course_id": course_id}
+        run_course_creation_job(job_id)  # pyright: ignore[reportCallIssue]
+        initial_state = mock_build.return_value.invoke.call_args.args[0]
+        assert initial_state["allow_duplicate"] is True
+
+    with SessionLocal() as db:
+        job = db.get(CourseJob, job_id)
+        assert job is not None
+        assert job.status == "succeeded"
+
+
 def test_resume_uses_same_thread_id_as_job_id():
     job_id = _make_job(topic_slug="celery-resume-topic")
     # See the spacer-row comment in test_successful_run_marks_job_succeeded_with_course:

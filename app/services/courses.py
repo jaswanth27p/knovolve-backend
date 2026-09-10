@@ -13,10 +13,12 @@ from app.agents.course_creation.nodes.normalize_topic import (
     _slugify,
     find_existing,
 )
+from app.config import settings
 from app.llm.factory import embed
 from app.models.course import Course, CourseJob, Module, Chapter
 from app.models.enrollment import UserCourse
-from app.schemas.course import CourseJobResponse, MyCourseJobResponse, PublicCourseResponse
+from app.schemas.course import CourseJobResponse, CourseCandidate, MyCourseJobResponse, PublicCourseResponse
+from app.services import course_preview
 from app.services.enrollment import touch_enrollment
 from app.tasks.course_creation_task import run_course_creation_job
 
@@ -121,7 +123,8 @@ def get_next_chapter_id(db: Session, chapter_id: int) -> int | None:
     return first_chapter.id if first_chapter is not None else None
 
 
-def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobResponse:
+def create_course_job(db: Session, user_id: int, topic_raw: str,
+                      force: bool = False, search_token: str | None = None) -> CourseJobResponse:
     # One in-flight generation per user at a time — the frontend already
     # blocks the "create" UI while a job is running, so a second job for
     # this user here would only be reachable by racing/replaying the
@@ -135,23 +138,74 @@ def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobRes
     if ongoing is not None:
         return CourseJobResponse(status="pending", job_id=ongoing.id)
 
-    # Canonicalize + embed ONCE, and dedup on the canonical embedding so
-    # semantically-similar-but-differently-worded topics collide correctly.
+    if force:
+        return _execute_forced(db, user_id, topic_raw, search_token)
+
+    # Canonicalize + embed ONCE, then show similar candidates instead of
+    # silently auto-merging: the user decides whether to navigate to an
+    # existing course or force-generate a new one.
     canonical = _canonical_topic(topic_raw)
     embedding = embed(canonical)
+    token = course_preview.cache_key(topic_raw, user_id)
+    course_preview.store_preview(token, canonical, embedding, topic_raw)
 
-    existing = find_existing(embedding, db)
-    if existing is not None:
-        if isinstance(existing, Course):
-            existing_course = _db_course(db, existing)
-            if existing_course is None:
-                raise HTTPException(status_code=500, detail="existing course not found")
-            touch_enrollment(db, user_id, existing_course)
-        return _existing_response(existing, db)
+    matches = course_preview.ranked_candidates(
+        db, embedding, limit=3, threshold=settings.topic_candidate_threshold
+    )
+    if matches:
+        return CourseJobResponse(
+            status="similar", search_token=token,
+            candidates=[CourseCandidate(**m) for m in matches],
+        )
 
+    return _create_and_dispatch(db, user_id, topic_raw, canonical, embedding)
+
+
+def _execute_forced(db: Session, user_id: int, topic_raw: str,
+                    search_token: str | None) -> CourseJobResponse:
+    """Force path: reuse the preview's canonicalization when the token
+    resolves (deterministic, zero extra LLM/embedding calls), else recompute.
+    Exact identity still wins over force — an existing course/job with the
+    exact canonical slug is attached to, only similarity matching is bypassed."""
+    cached = course_preview.load_preview(search_token) if search_token else None
+    if cached:
+        canonical = cached["canonical"]
+        embedding = cached["embedding"]
+        topic_raw = cached["topic_raw"]
+    else:
+        canonical = _canonical_topic(topic_raw)
+        embedding = embed(canonical)
+
+    slug = _slugify(canonical)
+    existing_course = db.scalar(select(Course).where(Course.topic_slug == slug))
+    if existing_course is not None:
+        course = _db_course(db, existing_course)
+        if course is None:
+            raise HTTPException(status_code=500, detail="existing course not found")
+        touch_enrollment(db, user_id, course)
+        return _existing_response(course, db)
+    dup_job = db.scalar(
+        select(CourseJob).where(
+            CourseJob.topic_slug == slug,
+            CourseJob.status.in_(["pending", "running"]),
+        )
+    )
+    if dup_job is not None:
+        return CourseJobResponse(status="pending", job_id=dup_job.id)
+
+    if search_token:
+        course_preview.clear_preview(search_token)
+    return _create_and_dispatch(db, user_id, topic_raw, canonical, embedding,
+                                allow_duplicate=True)
+
+
+def _create_and_dispatch(db: Session, user_id: int, topic_raw: str,
+                         canonical: str, embedding: list[float],
+                         allow_duplicate: bool = False) -> CourseJobResponse:
     job = CourseJob(
         topic_slug=_slugify(canonical), topic_raw=topic_raw, topic_embedding=embedding,
         status="pending", created_by_user_id=user_id,
+        allow_duplicate=allow_duplicate,
         created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
     )
     db.add(job)
@@ -159,7 +213,7 @@ def create_course_job(db: Session, user_id: int, topic_raw: str) -> CourseJobRes
         db.commit()
     except IntegrityError:
         # Mirror register()'s belt-and-suspenders: two concurrent requests for
-        # the same canonical topic can both pass find_existing before either
+        # the same canonical topic can both pass the dedup checks before either
         # commits, so the partial unique index on active (topic_slug) is the
         # real source of truth. The loser rolls back and attaches to the active
         # job (or finished course) that won the race, matched by the exact slug

@@ -66,6 +66,13 @@ def _canonicalize(topic_raw: str) -> str:
     return content.strip()
 
 def normalize_topic(state: CourseCreationState, db: Session) -> CourseCreationState:
+    # Force-created job: the user explicitly chose to generate a new course
+    # despite similar ones existing. Skip semantic dedup entirely — otherwise
+    # this would silently re-merge into the nearest >= threshold course and
+    # short-circuit to END instead of building the requested course.
+    if state.get("allow_duplicate"):
+        return {**state, "existing_course_id": None}
+
     slug = state["topic_slug"]
     embedding = state["topic_embedding"]
 

@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # Minimum cosine similarity for a Course/CourseJob to count as an existing
     # version of a requested topic (dedup).
     topic_similarity_threshold: float = 0.85
+    # Minimum cosine similarity for a Course/CourseJob to appear as a candidate
+    # in the "similar courses found" preview list (create_course_job). Looser
+    # than topic_similarity_threshold: the list is informational, the user
+    # decides whether to navigate or force-generate, so broader/narrower
+    # related courses should surface.
+    topic_candidate_threshold: float = 0.70
     # Celery broker: how long a crashed worker's message stays invisible before
     # redelivery. Must comfortably exceed the longest single graph run.
     celery_visibility_timeout_seconds: int = 6 * 60 * 60

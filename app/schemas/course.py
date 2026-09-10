@@ -4,6 +4,22 @@ from pydantic import BaseModel
 
 class CreateCourseRequest(BaseModel):
     topic: str
+    # force=True skips the similarity preview and schedules a new course even
+    # when similar courses exist, reusing the cached canonicalization from the
+    # preview (search_token). Exact-slug duplicates still attach.
+    force: bool = False
+    search_token: str | None = None
+
+
+class CourseCandidate(BaseModel):
+    id: int
+    topic_slug: str
+    topic_raw: str
+    similarity: float
+    status: str
+    course_url: str | None = None
+    module_count: int | None = None
+    chapter_count: int | None = None
 
 
 class CourseJobResponse(BaseModel):
@@ -11,6 +27,8 @@ class CourseJobResponse(BaseModel):
     job_id: int | None = None
     course: dict | None = None
     error: str | None = None
+    search_token: str | None = None
+    candidates: list[CourseCandidate] | None = None
 
 
 class MyCourseJobResponse(BaseModel):

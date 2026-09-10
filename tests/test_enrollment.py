@@ -65,28 +65,34 @@ def test_opening_course_enrolls_idempotently():
 
 
 def test_post_existing_course_enrolls_idempotently():
-    """create_course's exists branch (find_existing -> Course) must enroll the
-    user exactly once and keep bumping last_opened_at on repeat POSTs."""
+    """Force-attaching to an exact-duplicate course (the force path's exact-identity
+    branch) must enroll the user exactly once and keep bumping last_opened_at on
+    repeat POSTs."""
     headers = _auth_headers(email="enroll-d@example.com")
     with SessionLocal() as db:
         now = datetime.now(timezone.utc)
-        course = Course(topic_slug="enroll-d", topic_raw="Elixir",
+        course = Course(topic_slug="enroll-d", topic_raw="Enroll D",
                         topic_embedding=[0.0] * 2048, created_at=now)
         db.add(course)
         db.commit()
         db.refresh(course)
         course_id = course.id
 
-    patches = [
-        patch("app.services.courses._canonicalize", return_value="Elixir"),
-        patch("app.services.courses.embed", return_value=[0.0] * 2048),
-        patch("app.services.courses.find_existing", return_value=course),
-        patch("app.services.courses.run_course_creation_job.delay"),
-    ]
+    def _patches():
+        return [
+            patch("app.services.courses.course_preview.load_preview",
+                  return_value={"canonical": "Enroll D",
+                                "embedding": [0.0] * 2048,
+                                "topic_raw": "Enroll D"}),
+            patch("app.services.courses.run_course_creation_job.delay"),
+        ]
+
     with ExitStack() as stack:
-        for p in patches:
+        for p in _patches():
             stack.enter_context(p)
-        resp1 = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
+        resp1 = client.post("/courses", json={"topic": "Enroll D", "force": True,
+                                              "search_token": "knovolve:course:preview:e1"},
+                            headers=headers)
     assert resp1.status_code == 200
     assert resp1.json()["status"] == "exists"
     assert resp1.json()["course"]["id"] == course_id
@@ -96,9 +102,11 @@ def test_post_existing_course_enrolls_idempotently():
         first_opened = rows[0].last_opened_at
 
     with ExitStack() as stack:
-        for p in patches:
+        for p in _patches():
             stack.enter_context(p)
-        resp2 = client.post("/courses", json={"topic": "Elixir"}, headers=headers)
+        resp2 = client.post("/courses", json={"topic": "Enroll D", "force": True,
+                                              "search_token": "knovolve:course:preview:e1"},
+                            headers=headers)
     assert resp2.status_code == 200
     assert resp2.json()["course"]["id"] == course_id
     with SessionLocal() as db:

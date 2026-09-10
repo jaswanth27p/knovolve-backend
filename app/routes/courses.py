@@ -26,8 +26,9 @@ router = APIRouter(prefix="/courses", tags=["courses"])
 @router.post("", response_model=CourseJobResponse, status_code=202)
 def create_course(body: CreateCourseRequest, response: Response, db: Session = Depends(get_session),
                   user=Depends(get_current_user)):
-    result = courses.create_course_job(db, user.id, body.topic)
-    if result.status == "exists":
+    result = courses.create_course_job(db, user.id, body.topic,
+                                       force=body.force, search_token=body.search_token)
+    if result.status in ("exists", "similar"):
         response.status_code = 200
     return result
 

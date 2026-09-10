@@ -12,6 +12,26 @@ from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.learner_streak import LearnerStreak
 
 
+class _NullRedis:
+    """Stands in for Redis in tests: reads miss, writes succeed silently.
+    Course preview caching is convenience-only (missing entries degrade to
+    recomputation), so a null client keeps the suite hermetic."""
+    def get(self, _):
+        return None
+
+    def set(self, *_args, **_kwargs):
+        return True
+
+    def delete(self, *_args):
+        return 1
+
+
+@pytest.fixture(autouse=True)
+def _no_redis(monkeypatch):
+    from app.services import course_preview
+    monkeypatch.setattr(course_preview, "_get_client", lambda: _NullRedis())
+
+
 @pytest.fixture(autouse=True)
 def clean_db():
     yield

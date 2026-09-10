@@ -146,6 +146,10 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
             "concept_edges": None,
             "error": None,
         }
+        if job.allow_duplicate:
+            # Force-created job: tell normalize_topic to skip semantic dedup so
+            # the requested course is built instead of re-merged.
+            initial_state["allow_duplicate"] = True
 
         try:
             graph = build_course_creation_graph()

@@ -76,6 +76,30 @@ def test_preseeded_canonical_embedding_skips_llm():
     mock_can.assert_not_called()
     mock_embed.assert_not_called()
 
+def test_allow_duplicate_skips_dedup():
+    """Force-created jobs bypass semantic dedup entirely: even a near-identical
+    existing course must not short-circuit the graph."""
+    with SessionLocal() as db:
+        db.add(Course(topic_slug="typescript-generics", topic_raw="TypeScript Generics",
+                       topic_embedding=[0.99] + [0.0] * 2047,
+                       created_at=datetime.now(timezone.utc)))
+        db.commit()
+
+    state: CourseCreationState = {"job_id": 9, "topic_raw": "generics in typescript",
+              "topic_slug": "generics-in-typescript", "topic_embedding": [0.98] + [0.0] * 2047,
+              "existing_course_id": None, "modules": None, "concepts": None,
+              "concept_edges": None, "error": None, "allow_duplicate": True}
+
+    with patch("app.agents.course_creation.nodes.normalize_topic.embed") as mock_embed, \
+         patch("app.agents.course_creation.nodes.normalize_topic._canonicalize") as mock_can:
+        with SessionLocal() as db:
+            result = normalize_topic(state, db)
+    assert result["existing_course_id"] is None
+    assert result["topic_slug"] == "generics-in-typescript"
+    assert result["topic_embedding"] == [0.98] + [0.0] * 2047
+    mock_can.assert_not_called()
+    mock_embed.assert_not_called()
+
 def test_slugify_preserves_unicode_and_separators():
     from app.agents.course_creation.nodes.normalize_topic import _slugify
     assert _slugify("日本語 Programming") == "日本語-programming"

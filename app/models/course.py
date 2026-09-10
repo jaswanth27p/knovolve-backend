@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Integer, Text, Index
+from sqlalchemy import String, DateTime, ForeignKey, Integer, Text, Index, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from app.db import Base
@@ -26,6 +26,11 @@ class CourseJob(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending|running|succeeded|failed
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True)
+    # True when the user explicitly chose to generate a new course despite
+    # similar ones existing (force path). Makes the course-creation graph skip
+    # normalize_topic's semantic dedup so the forced course is actually built
+    # instead of silently re-merging into the nearest existing one.
+    allow_duplicate: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # Who triggered this job, for the "your in-flight courses" list on the
     # Learn page only — courses/modules themselves stay global/public, this
     # is purely job-tracking. Nullable: a dedup hit can attach a caller to a

@@ -11,6 +11,9 @@ class CourseCreationState(TypedDict):
     concepts: Optional[list]
     concept_edges: Optional[list]
     error: Optional[str]
+    # True for force-created jobs: normalize_topic must skip semantic dedup and
+    # build the course even when similar ones exist.
+    allow_duplicate: NotRequired[bool]
     # Validation failures seen per retry target, keyed by node name. Must be a
     # real state channel (not a router-local dict): LangGraph rebuilds the state
     # mapping from channel values on every step, so only values *returned* by a
