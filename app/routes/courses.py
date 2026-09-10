@@ -35,7 +35,7 @@ def create_course(body: CreateCourseRequest, response: Response, db: Session = D
 
 @router.get("/jobs/{job_id}", response_model=CourseJobResponse)
 def get_job(job_id: int, db: Session = Depends(get_session), user=Depends(get_current_user)):
-    return courses.get_course_job(db, job_id)
+    return courses.get_course_job(db, job_id, user.id)
 
 
 @router.get("/jobs", response_model=list[MyCourseJobResponse])
@@ -46,7 +46,7 @@ def list_my_jobs(db: Session = Depends(get_session), user=Depends(get_current_us
 @router.post("/jobs/{job_id}/retry", response_model=CourseJobResponse, status_code=202)
 def retry_job(job_id: int, response: Response, db: Session = Depends(get_session),
               user=Depends(get_current_user)):
-    result = courses.retry_course_job(db, job_id)
+    result = courses.retry_course_job(db, job_id, user.id)
     if result.status == "exists":
         response.status_code = 200
     return result
@@ -74,7 +74,7 @@ def list_public_courses(
 def get_course(slug: str, db: Session = Depends(get_session), user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     touch_enrollment(db, user.id, course)
-    return courses.serialize_course(db, course)
+    return courses.serialize_course(db, course, user.id)
 
 
 @router.get("/{slug}/chapters/{chapter_id}/content")
@@ -130,7 +130,7 @@ def get_chapter_version_assignment(slug: str, chapter_id: int, version: int, db:
 def create_module_assignment(slug: str, module_id: int, response: Response,
                               db: Session = Depends(get_session), user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    module = courses.get_module(db, course, module_id)
+    module = courses.get_module(db, course, module_id, user.id)
     result = assignments.create_module_assignment(db, module, user.id)
     if result.status == "ready":
         response.status_code = 200
@@ -141,7 +141,7 @@ def create_module_assignment(slug: str, module_id: int, response: Response,
 def get_module_assignment(slug: str, module_id: int, db: Session = Depends(get_session),
                            user=Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
-    module = courses.get_module(db, course, module_id)
+    module = courses.get_module(db, course, module_id, user.id)
     return assignments.get_module_assignment(db, module, user.id)
 
 

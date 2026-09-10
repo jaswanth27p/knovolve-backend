@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, inspect as sa_inspect, or_, select
+from sqlalchemy import and_, func, inspect as sa_inspect, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -39,16 +39,33 @@ def _db_course(db: Session, course: Course) -> Course | None:
     return db.get(Course, identity[0])
 
 
-def serialize_course(db: Session, course: Course) -> dict:
-    modules = db.query(Module).filter_by(course_id=course.id).order_by(Module.order).all()
+def visible_module_filter(course_id: int, user_id: int | None) -> list:
+    """SQLAlchemy filter args selecting a course's modules visible to `user_id`:
+    every global module, plus the caller's own user-scoped bucket."""
+    if user_id is None:
+        return [Module.course_id == course_id, Module.scope == "global"]
+    return [
+        Module.course_id == course_id,
+        or_(Module.scope == "global", and_(Module.scope == "user", Module.user_id == user_id)),
+    ]
+
+
+def serialize_course(db: Session, course: Course, user_id: int | None = None) -> dict:
+    modules = db.query(Module).filter(*visible_module_filter(course.id, user_id)) \
+        .order_by(Module.order).all()
+    result = []
+    for m in modules:
+        chapters = db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()
+        if m.scope == "user" and not chapters:
+            continue  # never surface an empty bucket
+        result.append({
+            "id": m.id, "title": m.title, "objective": m.objective,
+            "is_additional": m.scope == "user",
+            "chapters": [{"id": c.id, "title": c.title, "objective": c.objective} for c in chapters],
+        })
     return {
         "id": course.id, "topic_slug": course.topic_slug, "topic_raw": course.topic_raw,
-        "modules": [
-            {"id": m.id, "title": m.title, "objective": m.objective,
-             "chapters": [{"id": c.id, "title": c.title, "objective": c.objective}
-                          for c in db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()]}
-            for m in modules
-        ],
+        "modules": result,
     }
 
 
@@ -62,7 +79,7 @@ def _canonical_topic(raw: str) -> str:
         return raw
 
 
-def _existing_response(existing: Course | CourseJob, db: Session) -> CourseJobResponse:
+def _existing_response(existing: Course | CourseJob, db: Session, user_id: int | None = None) -> CourseJobResponse:
     """Dedup hit -> response object. status="exists" (course found) or
     status="pending" (in-flight duplicate job); the route maps "exists" to HTTP
     200 and leaves the decorator's 202 default for "pending"."""
@@ -71,7 +88,7 @@ def _existing_response(existing: Course | CourseJob, db: Session) -> CourseJobRe
         if course is None:
             raise HTTPException(status_code=500, detail="existing course not found")
         return CourseJobResponse(
-            status="exists", job_id=course.id, course=serialize_course(db, course)
+            status="exists", job_id=course.id, course=serialize_course(db, course, user_id)
         )
     return CourseJobResponse(status="pending", job_id=existing.id)
 
@@ -83,14 +100,16 @@ def get_course_by_slug(db: Session, slug: str) -> Course:
     return course
 
 
-def get_module(db: Session, course: Course, module_id: int) -> Module:
-    module = db.query(Module).filter_by(id=module_id, course_id=course.id).first()
+def get_module(db: Session, course: Course, module_id: int, user_id: int | None = None) -> Module:
+    module = db.query(Module).filter(
+        *visible_module_filter(course.id, user_id), Module.id == module_id,
+    ).first()
     if not module:
         raise HTTPException(status_code=404, detail="module not found")
     return module
 
 
-def get_next_chapter_id(db: Session, chapter_id: int) -> int | None:
+def get_next_chapter_id(db: Session, chapter_id: int, user_id: int | None = None) -> int | None:
     """Chapter immediately after `chapter_id` in course learning order: the
     next chapter in the same module by `Chapter.order`, else the first
     chapter of the next module by `Module.order`. None if `chapter_id` is
@@ -100,6 +119,8 @@ def get_next_chapter_id(db: Session, chapter_id: int) -> int | None:
         return None
     module = db.get(Module, chapter.module_id)
     if module is None:
+        return None
+    if module.scope == "user" and module.user_id != user_id:
         return None
     next_in_module = db.scalar(
         select(Chapter)
@@ -111,7 +132,7 @@ def get_next_chapter_id(db: Session, chapter_id: int) -> int | None:
         return next_in_module.id
     next_module = db.scalar(
         select(Module)
-        .where(Module.course_id == module.course_id, Module.order > module.order)
+        .where(*visible_module_filter(module.course_id, user_id), Module.order > module.order)
         .order_by(Module.order)
         .limit(1)
     )
@@ -183,7 +204,7 @@ def _execute_forced(db: Session, user_id: int, topic_raw: str,
         if course is None:
             raise HTTPException(status_code=500, detail="existing course not found")
         touch_enrollment(db, user_id, course)
-        return _existing_response(course, db)
+        return _existing_response(course, db, user_id)
     dup_job = db.scalar(
         select(CourseJob).where(
             CourseJob.topic_slug == slug,
@@ -229,7 +250,7 @@ def _create_and_dispatch(db: Session, user_id: int, topic_raw: str,
             return CourseJobResponse(status="pending", job_id=dup.id)
         course = db.scalar(select(Course).where(Course.topic_slug == job.topic_slug))
         if course is not None:
-            return CourseJobResponse(status="exists", course=serialize_course(db, course))
+            return CourseJobResponse(status="exists", course=serialize_course(db, course, user_id))
         raise HTTPException(status_code=500, detail="could not enqueue course job")
     db.refresh(job)
     # pyright sees the plain function signature behind the @celery_app.task
@@ -240,7 +261,7 @@ def _create_and_dispatch(db: Session, user_id: int, topic_raw: str,
     return CourseJobResponse(status="pending", job_id=job.id)
 
 
-def get_course_job(db: Session, job_id: int) -> CourseJobResponse:
+def get_course_job(db: Session, job_id: int, user_id: int | None = None) -> CourseJobResponse:
     job = db.get(CourseJob, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
@@ -248,7 +269,7 @@ def get_course_job(db: Session, job_id: int) -> CourseJobResponse:
     if job.status == "succeeded" and job.course_id:
         course_row = db.get(Course, job.course_id)
         if course_row is not None:
-            course = serialize_course(db, course_row)
+            course = serialize_course(db, course_row, user_id)
     return CourseJobResponse(status=job.status, job_id=job.id, course=course, error=job.error)
 
 
@@ -290,7 +311,7 @@ def list_my_course_jobs(db: Session, user_id: int) -> list[MyCourseJobResponse]:
     return result
 
 
-def retry_course_job(db: Session, job_id: int) -> CourseJobResponse:
+def retry_course_job(db: Session, job_id: int, user_id: int | None = None) -> CourseJobResponse:
     """Re-run a failed course job so no job is dead-ended. Before regenerating,
     dedup is re-checked on the job's stored canonical embedding: if a course for
     the topic exists now it is attached instead of paid for again; if another
@@ -302,7 +323,7 @@ def retry_course_job(db: Session, job_id: int) -> CourseJobResponse:
         course = db.get(Course, job.course_id) if job.course_id else None
         return CourseJobResponse(
             status="exists", job_id=job.id,
-            course=serialize_course(db, course) if course else None,
+            course=serialize_course(db, course, user_id) if course else None,
         )
     if job.status != "failed":
         raise HTTPException(status_code=409, detail="only failed jobs can be retried")
@@ -317,7 +338,7 @@ def retry_course_job(db: Session, job_id: int) -> CourseJobResponse:
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
             return CourseJobResponse(status="exists", job_id=job.id,
-                                     course=serialize_course(db, course))
+                                     course=serialize_course(db, course, user_id))
     if isinstance(found, CourseJob):
         # Another job already owns this topic; point the caller at it.
         return CourseJobResponse(status="pending", job_id=found.id)
