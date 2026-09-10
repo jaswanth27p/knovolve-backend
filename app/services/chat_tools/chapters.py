@@ -6,6 +6,7 @@ from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter, Module
 from app.services import progression
 from app.services.assignments import _chapter_assignment
+from app.services.chapter_content import _visible_to_user
 from app.services.chat_tools._authz import require_started_course
 from app.services.chat_tools._errors import ChatToolError
 
@@ -55,11 +56,25 @@ def get_chapter_progress(db: Session, user_id: int, course_slug: str, chapter_id
     }
 
 
-def get_chapter_content(db: Session, user_id: int, course_slug: str, chapter_id: int) -> dict:
+def get_chapter_content(
+    db: Session, user_id: int, course_slug: str, chapter_id: int, version: int | None = None,
+) -> dict:
     course = require_started_course(db, user_id, course_slug)
     _require_chapter_in_course(db, course.id, chapter_id)
 
-    content = progression._resolve_relevant_content(db, chapter_id, user_id)
+    if version is None:
+        content = progression._resolve_relevant_content(db, chapter_id, user_id)
+    else:
+        content = db.scalar(
+            select(ChapterContent).where(
+                ChapterContent.chapter_id == chapter_id,
+                ChapterContent.version == version,
+                _visible_to_user(user_id),
+            )
+        )
+        if content is None:
+            raise ChatToolError(f"No version {version} of this chapter's content for you.")
+
     if content is None or content.status != "ready":
         return {"available": False, "reason": "Chapter content has not been generated yet."}
 

@@ -60,9 +60,9 @@ def build_tools(db: Session, user_id: int) -> list[BaseTool]:
         return chapters.get_chapter_progress(db, user_id, course_slug, chapter_id)
 
     @tool
-    def get_chapter_content(course_slug: str, chapter_id: int) -> dict:
-        """Fetch the chapter's generated content if it exists. Never triggers generation."""
-        return chapters.get_chapter_content(db, user_id, course_slug, chapter_id)
+    def get_chapter_content(course_slug: str, chapter_id: int, version: int | None = None) -> dict:
+        """Fetch the chapter's generated content — the currently relevant version, or a specific past version. Never triggers generation."""
+        return chapters.get_chapter_content(db, user_id, course_slug, chapter_id, version)
 
     @tool
     def get_assignment(assignment_id: int) -> dict:
