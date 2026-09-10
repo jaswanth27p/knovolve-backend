@@ -2,15 +2,17 @@ from app.db import SessionLocal
 from app.services.chat_tools.registry import build_tools
 
 
-def test_build_tools_returns_all_sixteen_tools_with_unique_names():
+def test_build_tools_returns_all_eighteen_tools_with_unique_names():
     with SessionLocal() as db:
         tools = build_tools(db, user_id=1)
     names = [t.name for t in tools]
-    assert len(names) == 16
-    assert len(set(names)) == 16
+    assert len(names) == 18
+    assert len(set(names)) == 18
     assert "search_courses" in names
     assert "get_recurring_weak_concepts" in names
     assert "get_user_stats" in names
+    assert "get_chapter_assignment" in names
+    assert "get_recent_assignment_attempts" in names
 
 
 def test_build_tools_no_arg_tool_is_invocable():

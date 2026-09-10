@@ -1,4 +1,4 @@
-"""Builds this request's tool list: 16 read-only chat-agent tools, each a
+"""Builds this request's tool list: 18 read-only chat-agent tools, each a
 closure over the request's `db` session and authenticated `user_id` so the
 underlying functions (app.services.chat_tools.{courses,mastery,chapters,
 assignments,stats}) never see untrusted identity from the LLM."""
@@ -85,6 +85,16 @@ def build_tools(db: Session, user_id: int) -> list[BaseTool]:
         return assignments.get_question(db, user_id, question_id)
 
     @tool
+    def get_chapter_assignment(course_slug: str, chapter_id: int, version: int | None = None) -> dict:
+        """Get a chapter's assignment questions — for the currently relevant content version or a specific past version. Read-only; never triggers generation."""
+        return assignments.get_chapter_assignment(db, user_id, course_slug, chapter_id, version)
+
+    @tool
+    def get_recent_assignment_attempts(limit: int = 5) -> list[dict]:
+        """List the learner's most recent assignment attempts across all courses, most recent first. Default 5, max 10."""
+        return assignments.get_recent_assignment_attempts(db, user_id, limit)
+
+    @tool
     def get_user_stats() -> dict:
         """Get the learner's stats: streak, in-progress/completed counts, assignments attempted today."""
         return stats.get_user_stats(db, user_id)
@@ -95,5 +105,6 @@ def build_tools(db: Session, user_id: int) -> list[BaseTool]:
         get_recurring_weak_concepts,
         get_chapter_progress, get_chapter_content,
         get_assignment, list_assignment_attempts, get_attempt_detail, get_question,
+        get_chapter_assignment, get_recent_assignment_attempts,
         get_user_stats,
     ]
