@@ -49,8 +49,7 @@ def delete_my_course(course_id: int, db: Session = Depends(get_session),
 
 @router.post("/chat", response_model=ChatResponse)
 def post_chat(body: ChatRequest, db: Session = Depends(get_session), user: User = Depends(get_current_user)):
-    reply = chat_service.answer_chat_message(db, user.id, body.course_slug, body.chapter_id, body.message)
-    return ChatResponse(reply=reply)
+    return chat_service.answer_chat_message(db, user.id, body)
 
 
 @router.post("/chat/stream")
@@ -60,6 +59,6 @@ def post_chat_stream(body: ChatRequest, db: Session = Depends(get_session), user
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(
-        _encode(chat_service.stream_chat_message(db, user.id, body.course_slug, body.chapter_id, body.message)),
+        _encode(chat_service.stream_chat_message(db, user.id, body)),
         media_type="application/x-ndjson",
     )
