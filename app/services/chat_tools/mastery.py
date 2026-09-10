@@ -44,31 +44,43 @@ def get_recurring_weak_concepts(
     db: Session, user_id: int, course_slug: str, min_occurrences: int = 3,
 ) -> list[dict]:
     """Concepts that appear in ChapterContent.remediation_target_tags across
-    >= min_occurrences versions of the same chapter (global v1 has no tags;
-    v2+ are remediation rounds), aggregated across the whole course, ranked
-    by total occurrences descending."""
+    >= min_occurrences *consecutive* versions of the *same* chapter (global v1
+    has no tags; v2+ are remediation rounds). A concept surfacing once in each
+    of three different chapters is not "recurring" — it has to survive
+    repeated remediation of one chapter. Qualifying chapters are aggregated
+    across the course and ranked by total consecutive occurrences."""
     course = require_started_course(db, user_id, course_slug)
     chapter_ids = [
         c.id for c in db.scalars(
             select(Chapter).join(Module, Chapter.module_id == Module.id).where(Module.course_id == course.id)
         ).all()
     ]
-    tag_counts: dict[str, int] = {}
+    tag_occurrences: dict[str, int] = {}
     for chapter_id in chapter_ids:
         contents = db.scalars(
             select(ChapterContent).where(
                 ChapterContent.chapter_id == chapter_id,
                 (ChapterContent.scope == "global")
                 | ((ChapterContent.scope == "user") & (ChapterContent.user_id == user_id)),
-            ).order_by(ChapterContent.version)
+            ).order_by(ChapterContent.version, ChapterContent.id)
         ).all()
+        longest_run: dict[str, int] = {}
+        current_run: dict[str, int] = {}
         for content in contents:
-            for tag in (content.remediation_target_tags or []):
-                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            tags = set(content.remediation_target_tags or [])
+            for tag in tags:
+                current_run[tag] = current_run.get(tag, 0) + 1
+                longest_run[tag] = max(longest_run.get(tag, 0), current_run[tag])
+            for tag in current_run:
+                if tag not in tags:
+                    current_run[tag] = 0
+        for tag, run in longest_run.items():
+            if run >= min_occurrences:
+                tag_occurrences[tag] = tag_occurrences.get(tag, 0) + run
     return sorted(
         (
             {"concept_tag": tag, "occurrences": count}
-            for tag, count in tag_counts.items() if count >= min_occurrences
+            for tag, count in tag_occurrences.items()
         ),
         key=lambda row: -row["occurrences"],
     )

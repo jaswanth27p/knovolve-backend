@@ -220,3 +220,33 @@ def test_stream_yields_fallback_reply_when_no_tokens_are_produced(monkeypatch):
 
     assert events[-2] == {"type": "token", "text": chat.FALLBACK_REPLY}
     assert events[-1] == {"type": "done"}
+
+
+def test_stream_reuses_buffered_answer_when_stream_comes_back_empty(monkeypatch):
+    """The final `model.stream(...)` is a fresh generation and can return no
+    tokens (e.g. it decides to call a tool). Prefer the tool-free answer the
+    buffered rounds already produced over the generic placeholder."""
+    model = _bound_model([AIMessage(content="Buffered answer")])
+    model.stream.return_value = []
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="hi")))
+
+    assert events[-2] == {"type": "token", "text": "Buffered answer"}
+    assert events[-1] == {"type": "done"}
+
+
+def test_stream_emits_error_event_when_bundle_build_fails(monkeypatch):
+    """Building the first-turn bundle can hit the DB; a failure there must
+    still reach the client as an `error` event, not escape the generator."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("app.services.chat.build_context_bundle", _boom)
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="hi")))
+
+    assert events == [{"type": "error", "message": "Failed to generate a reply. Please try again."}]

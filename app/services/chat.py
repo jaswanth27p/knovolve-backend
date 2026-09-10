@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # tools (bad args, a tool that never satisfies it) can't loop forever.
 MAX_TOOL_ROUNDS = 5
 
+# Only the most recent turns actually reach the model. The request schema
+# accepts a longer history (MAX_HISTORY_TURNS) so the client can hold the full
+# conversation, but the prompt is deliberately bounded so a long-running
+# conversation can't grow the prompt without limit.
+MAX_PROMPT_HISTORY_TURNS = 20
+
 # Used whenever the model never produces any text of its own — it burned through
 # MAX_TOOL_ROUNDS still asking for tools, or streamed zero tokens. Better than
 # handing the user a blank reply with no signal that anything went wrong.
@@ -37,9 +43,10 @@ BoundModel = Runnable[LanguageModelInput, BaseMessage]
 
 
 def _history_to_messages(history: list[ChatTurn]) -> list[BaseMessage]:
+    recent = history[-MAX_PROMPT_HISTORY_TURNS:]
     return [
         HumanMessage(content=turn.content) if turn.role == "user" else AIMessage(content=turn.content)
-        for turn in history
+        for turn in recent
     ]
 
 
@@ -111,24 +118,31 @@ def answer_chat_message(db: Session, user_id: int, req: ChatRequest) -> ChatResp
 
 
 def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator[dict]:
-    bundle = req.context if req.context is not None else build_context_bundle(db, user_id, req.current_route)
-    if req.context is None:
-        yield {"type": "context", "bundle": bundle.model_dump(mode="json")}
-
-    # `_build_agent` runs the tool rounds, so it belongs inside the try: the
-    # response has already started streaming and any failure from here on has to
-    # reach the client as an `error` event, not as a truncated stream.
-    yielded_any = False
+    # Everything that can fail lives inside the try: the response has already
+    # started streaming once we yield, so any failure from here on has to reach
+    # the client as an `error` event, not escape the generator and truncate the
+    # stream (this includes building the bundle on the first turn).
     try:
-        model, messages, _ = _build_agent(db, user_id, req, bundle)
+        bundle = req.context if req.context is not None else build_context_bundle(db, user_id, req.current_route)
+        if req.context is None:
+            yield {"type": "context", "bundle": bundle.model_dump(mode="json")}
+
+        model, messages, final = _build_agent(db, user_id, req, bundle)
+        yielded_any = False
         for chunk in model.stream(messages):
             content = chunk.content
             if isinstance(content, str) and content:
                 yielded_any = True
                 yield {"type": "token", "text": content}
+        if not yielded_any:
+            # The streaming call is a fresh generation and can come back empty
+            # (or decide to call a tool); prefer the already-buffered tool-free
+            # answer over the generic placeholder.
+            if final is not None and isinstance(final.content, str) and final.content.strip():
+                yield {"type": "token", "text": final.content}
+            else:
+                yield {"type": "token", "text": FALLBACK_REPLY}
     except Exception:  # noqa: BLE001 - surfaced to the client as a chat error, not a 500
         yield {"type": "error", "message": "Failed to generate a reply. Please try again."}
         return
-    if not yielded_any:
-        yield {"type": "token", "text": FALLBACK_REPLY}
     yield {"type": "done"}

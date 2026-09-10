@@ -78,3 +78,41 @@ def test_get_recurring_weak_concepts_counts_across_versions():
     with SessionLocal() as db:
         result = mastery_tools.get_recurring_weak_concepts(db, user_id, slug, min_occurrences=2)
     assert result == [{"concept_tag": "concept-a", "occurrences": 2}]
+
+
+def test_get_recurring_weak_concepts_does_not_count_across_different_chapters():
+    with SessionLocal() as db:
+        user = User(email="mt-d@example.com", password_hash="x")
+        db.add(user); db.flush()
+        course, module, chapter_a, chapter_b = _make_course_with_two_chapters(db, "mt-course-d", user.id)
+        # The same tag shows up once in each chapter, but never twice in a row
+        # within either — that is not "recurring" for any single chapter.
+        db.add(ChapterContent(chapter_id=chapter_a.id, version=2, scope="global", status="ready", outline=[],
+                               remediation_target_tags=["shared-tag"], created_at=_now(), updated_at=_now()))
+        db.add(ChapterContent(chapter_id=chapter_b.id, version=2, scope="global", status="ready", outline=[],
+                               remediation_target_tags=["shared-tag"], created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id, slug = user.id, course.topic_slug
+
+    with SessionLocal() as db:
+        result = mastery_tools.get_recurring_weak_concepts(db, user_id, slug, min_occurrences=2)
+    assert result == []
+
+
+def test_get_recurring_weak_concepts_requires_consecutive_versions():
+    with SessionLocal() as db:
+        user = User(email="mt-e@example.com", password_hash="x")
+        db.add(user); db.flush()
+        course, module, chapter_a, _ = _make_course_with_two_chapters(db, "mt-course-e", user.id)
+        # concept-a appears in v2 and v4 but not v3, so the two occurrences are
+        # not consecutive — only a run of 1.
+        for version, tags in [(2, ["concept-a"]), (3, ["concept-b"]), (4, ["concept-a"])]:
+            db.add(ChapterContent(chapter_id=chapter_a.id, version=version, scope="global", status="ready",
+                                   outline=[], remediation_target_tags=tags,
+                                   created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id, slug = user.id, course.topic_slug
+
+    with SessionLocal() as db:
+        result = mastery_tools.get_recurring_weak_concepts(db, user_id, slug, min_occurrences=2)
+    assert result == []

@@ -1,11 +1,19 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+# Client-sent `history`/`message` are echoed back into the prompt on every
+# turn, so they are bounded here to keep a single request from inflating LLM
+# cost or overflowing the model context window. app.services.chat additionally
+# truncates to the most recent MAX_PROMPT_HISTORY_TURNS turns before prompting.
+MAX_MESSAGE_CHARS = 8000
+MAX_CHAT_TURN_CHARS = 20000
+MAX_HISTORY_TURNS = 100
 
 
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(..., max_length=MAX_CHAT_TURN_CHARS)
 
 
 class RouteContext(BaseModel):
@@ -48,8 +56,8 @@ class LearnerContextBundle(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
-    history: list[ChatTurn] = []
+    message: str = Field(..., max_length=MAX_MESSAGE_CHARS)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
     context: LearnerContextBundle | None = None
     current_route: RouteContext | None = None
 

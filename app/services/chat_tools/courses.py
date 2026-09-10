@@ -52,6 +52,12 @@ def search_courses(db: Session, user_id: int, query: str, limit: int = 5) -> lis
 
 
 def get_course_detail(db: Session, user_id: int, course_slug: str) -> dict:
+    """Public catalog read — deliberately NOT gated by require_started_course.
+
+    A learner must be able to inspect a course the agent surfaced via
+    browse_public_courses/search_courses before starting it. Only this user's
+    own enrollment row is used for `started`/`progress`, so nothing private to
+    another learner is exposed; deep content stays behind the scoped tools."""
     course = db.scalar(select(Course).where(Course.topic_slug == course_slug))
     if course is None:
         raise ChatToolError(f"No course found with slug '{course_slug}'.")
