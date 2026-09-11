@@ -371,6 +371,9 @@ GENERATE_CHAPTER_SECTION_PROMPT = ChatPromptTemplate.from_messages(
         ),
         (
             "human",
+            "Web research notes (may be the placeholder "
+            "\"(no web research available)\"; if so, ignore them and rely on "
+            "your own knowledge):\n{research_notes}\n\n"
             "Chapter: {chapter_title} — {chapter_objective}\n"
             "Section heading: {heading}\n"
             "Section objective: {objective}\n"

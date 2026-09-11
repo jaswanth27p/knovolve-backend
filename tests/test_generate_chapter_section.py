@@ -82,3 +82,29 @@ def test_diagram_spec_round_trips():
 
     assert result.diagram_spec is not None
     assert result.diagram_spec.edges[0].source == "a"
+
+
+def test_research_notes_are_injected_into_prompt():
+    fake = ChapterSectionResponse(body_markdown="Content.", examples=[], diagram_spec=None)
+    mock_model = MagicMock()
+    structured = mock_model.with_structured_output.return_value
+    structured.invoke.return_value = fake
+
+    with patch("app.agents.chapter_content.nodes.generate_chapter_section.get_chat_model", return_value=mock_model):
+        generate_chapter_section("Ch", "obj", "Heading", "sec obj", "intro", "KEY FACT | http://src")
+
+    messages = structured.invoke.call_args.args[0]
+    assert any("KEY FACT | http://src" in m.content for m in messages)
+
+
+def test_missing_research_notes_fall_back_to_placeholder():
+    fake = ChapterSectionResponse(body_markdown="Content.", examples=[], diagram_spec=None)
+    mock_model = MagicMock()
+    structured = mock_model.with_structured_output.return_value
+    structured.invoke.return_value = fake
+
+    with patch("app.agents.chapter_content.nodes.generate_chapter_section.get_chat_model", return_value=mock_model):
+        generate_chapter_section("Ch", "obj", "Heading", "sec obj", "intro")
+
+    messages = structured.invoke.call_args.args[0]
+    assert any("(no web research available)" in m.content for m in messages)

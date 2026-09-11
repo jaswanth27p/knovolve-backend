@@ -3,6 +3,7 @@ from langchain_core.messages import HumanMessage
 from app.llm.factory import get_chat_model
 from app.llm.prompts import GENERATE_CHAPTER_SECTION_PROMPT
 from app.llm.retry import call_with_retry
+from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 
 
 class ExampleDraft(BaseModel):
@@ -44,12 +45,14 @@ _CORRECTIVE_MESSAGE = HumanMessage(
 
 def generate_chapter_section(
     chapter_title: str, chapter_objective: str, heading: str, objective: str, kind: str,
+    research_notes: str | None = None,
 ) -> ChapterSectionResponse:
     model = get_chat_model("generate_chapter_section")
     structured = model.with_structured_output(ChapterSectionResponse)
     messages = GENERATE_CHAPTER_SECTION_PROMPT.format_messages(
         chapter_title=chapter_title, chapter_objective=chapter_objective,
         heading=heading, objective=objective, kind=kind,
+        research_notes=research_notes or FALLBACK_RESEARCH_NOTES,
     )
     result = call_with_retry(structured.invoke, messages)
 
