@@ -105,6 +105,43 @@ def test_assignment_answers_stay_inside_course_scoped_tool():
             assignment_tools.get_assignment_questions(db, 102, slug, assignment_id)
 
 
+def test_assignment_questions_exclude_other_learners_topups():
+    slug, chapter_id, _ = _seed_tool_course()
+    with SessionLocal() as db:
+        chapter = db.get(Chapter, chapter_id)
+        assert chapter is not None
+        now = datetime.now(timezone.utc)
+        module_assignment = Assignment(level="module", module_id=chapter.module_id, scope="global",
+                                       status="ready", created_at=now, updated_at=now)
+        db.add(module_assignment)
+        db.commit()
+        db.refresh(module_assignment)
+        db.add(AssignmentQuestion(assignment_id=module_assignment.id, order=1, type="mcq",
+                                  text="Global", options=["A", "B"], correct_answer="A",
+                                  explanation="g", concept_tag="concept", difficulty="easy",
+                                  user_id=None))
+        db.add(AssignmentQuestion(assignment_id=module_assignment.id, order=2, type="mcq",
+                                  text="Other learner", options=["A", "B"], correct_answer="B",
+                                  explanation="leak", concept_tag="concept", difficulty="easy",
+                                  user_id=102))
+        db.commit()
+        questions = assignment_tools.get_assignment_questions(db, 101, slug, module_assignment.id)
+        assert [q["text"] for q in questions["questions"]] == ["Global"]
+
+
+def test_listings_exclude_other_learners_user_scoped_chapters():
+    slug, chapter_id, _ = _seed_tool_course()
+    with SessionLocal() as db:
+        chapter = db.get(Chapter, chapter_id)
+        assert chapter is not None
+        db.add(Chapter(module_id=chapter.module_id, title="Other learner", objective="o", order=2,
+                       scope="user", user_id=102))
+        db.commit()
+        assert [c["title"] for c in content_tools.list_all_chapters(db, 101, slug)] == ["C"]
+        listed = content_tools.list_chapters(db, 101, slug, chapter.module_id)
+        assert [c["title"] for c in listed] == ["C"]
+
+
 def test_registry_contains_all_eight_course_scoped_tools():
     with SessionLocal() as db:
         names = sorted(t.name for t in build_export_tools(db, 101, "export-tools"))

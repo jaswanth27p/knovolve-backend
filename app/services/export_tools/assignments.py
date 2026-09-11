@@ -76,7 +76,10 @@ def get_assignment_questions(db: Session, user_id: int, course_slug: str, assign
         raise ExportToolError(f"Assignment {assignment_id} is not available to you.")
     questions = db.scalars(
         select(AssignmentQuestion)
-        .where(AssignmentQuestion.assignment_id == assignment.id)
+        .where(
+            AssignmentQuestion.assignment_id == assignment.id,
+            (AssignmentQuestion.user_id.is_(None)) | (AssignmentQuestion.user_id == user_id),
+        )
         .order_by(AssignmentQuestion.order)
     ).all()
     return {

@@ -28,6 +28,24 @@ def _chapter_scope(chapter: Chapter, user_id: int) -> str:
     raise ExportToolError(f"Chapter {chapter.id} is not available to you.")
 
 
+def _visible_chapters(user_id: int):
+    """Shared visibility predicate for chapter listings: the chapter's shared
+    global row, or this user's own user-scoped row — never another user's.
+    Mirrors `_chapter_scope`'s allowed set, but excludes rather than raises so
+    listings skip invisible chapters instead of aborting."""
+    return or_(
+        Chapter.scope == "global",
+        and_(Chapter.scope == "user", Chapter.user_id == user_id),
+    )
+
+
+def _content_scope(content: ChapterContent) -> str:
+    """Map a content/version row to its export-facing scope label."""
+    if content.remediation_source_attempt_id is not None:
+        return "remediation"
+    return "additional" if content.scope == "user" else "global"
+
+
 def list_modules(db: Session, user_id: int, course_slug: str) -> list[dict]:
     course = require_export_course(db, user_id, course_slug)
     modules = db.query(Module).filter(
@@ -55,7 +73,9 @@ def list_chapters(db: Session, user_id: int, course_slug: str, module_id: int) -
         raise ExportToolError(f"No module {module_id} in this course.")
     if module.scope == "user" and module.user_id != user_id:
         raise ExportToolError(f"Module {module_id} is not available to you.")
-    chapters = db.query(Chapter).filter_by(module_id=module.id).order_by(Chapter.order).all()
+    chapters = db.query(Chapter).filter(
+        Chapter.module_id == module.id, _visible_chapters(user_id),
+    ).order_by(Chapter.order).all()
     return [
         {"id": c.id, "title": c.title, "objective": c.objective, "scope": _chapter_scope(c, user_id)}
         for c in chapters
@@ -73,7 +93,9 @@ def list_all_chapters(db: Session, user_id: int, course_slug: str) -> list[dict]
     ).order_by(Module.order).all()
     out = []
     for module in modules:
-        chapters = db.query(Chapter).filter_by(module_id=module.id).order_by(Chapter.order).all()
+        chapters = db.query(Chapter).filter(
+            Chapter.module_id == module.id, _visible_chapters(user_id),
+        ).order_by(Chapter.order).all()
         for chapter in chapters:
             out.append({
                 "chapter_id": chapter.id,
@@ -104,8 +126,7 @@ def get_chapter_versions(db: Session, user_id: int, course_slug: str, chapter_id
             {
                 "version": v.version,
                 "status": v.status,
-                "scope": "remediation" if v.remediation_source_attempt_id is not None
-                else "additional" if v.scope == "user" else "global",
+                "scope": _content_scope(v),
             }
             for v in versions
         ],
@@ -121,8 +142,7 @@ def _serialize_version_content(content: ChapterContent, db: Session) -> dict:
     return {
         "available": True,
         "version": content.version,
-        "scope": "remediation" if content.remediation_source_attempt_id is not None
-        else "additional" if content.scope == "user" else "global",
+        "scope": _content_scope(content),
         "sections": [
             {
                 "heading": s.heading,
