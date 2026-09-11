@@ -24,6 +24,7 @@ celery_app.conf.include = [
     "app.tasks.chapter_content_tasks",
     "app.tasks.auth_tasks",
     "app.tasks.export_tasks",
+    "app.tasks.course_generation_task",
 ]
 
 # Periodic hygiene: revoked/expired refresh_tokens rows otherwise accumulate
