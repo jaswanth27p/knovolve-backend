@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     web_page_max_chars: int = 8000
     web_research_max_tool_rounds: int = 4
     web_research_max_tool_calls: int = 8
+    # Chapter-content web research. Governed independently of
+    # web_search_enabled (which gates course-structure research) because
+    # chapter content streams to a waiting learner, so its latency/cost must
+    # be tunable on its own.
+    chapter_research_enabled: bool = True
+    chapter_research_max_tool_rounds: int = 3
+    chapter_research_max_tool_calls: int = 6
     web_request_timeout_seconds: float = 15.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.

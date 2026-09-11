@@ -161,3 +161,14 @@ def test_multiple_null_remediation_source_rows_allowed():
         db.add(ChapterContent(chapter_id=chapter_id, version=1, scope="user", user_id=None,
                                status="generating", outline=[], created_at=_now(), updated_at=_now()))
         db.commit()  # should not raise — the partial index only applies where remediation_source_attempt_id IS NOT NULL
+
+
+def test_content_defaults_research_notes_to_none():
+    with SessionLocal() as db:
+        chapter_id = _make_chapter(db, "cc-models-research-notes")
+        content = ChapterContent(chapter_id=chapter_id, version=1, scope="global", status="ready",
+                                  outline=[], created_at=_now(), updated_at=_now())
+        db.add(content)
+        db.commit()
+        db.refresh(content)
+        assert content.research_notes is None

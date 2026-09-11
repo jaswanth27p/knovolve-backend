@@ -22,6 +22,9 @@ def test_settings_defaults_present():
     assert s.web_research_max_tool_rounds == 4
     assert s.web_research_max_tool_calls == 8
     assert s.web_request_timeout_seconds == 15.0
+    assert s.chapter_research_enabled is True
+    assert s.chapter_research_max_tool_rounds == 3
+    assert s.chapter_research_max_tool_calls == 6
 
 
 def _resp(text: str) -> MagicMock:
