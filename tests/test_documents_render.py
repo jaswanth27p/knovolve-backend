@@ -1,3 +1,4 @@
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 from app.documents import render
@@ -86,3 +87,8 @@ def test_diagram_helper_embeds_svg_bytes():
 
     assert uri is not None
     assert uri.startswith("data:image/svg+xml;base64,")
+
+
+def test_diagram_helper_returns_none_when_fetch_fails():
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        assert render.diagram_data_uri("http://example.invalid/x.svg") is None

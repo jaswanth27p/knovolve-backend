@@ -1,5 +1,6 @@
 """Markdown-to-PDF rendering for exports and generated course documents."""
 import base64
+import logging
 import os
 import sys
 import urllib.request
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import markdown
 from jinja2 import Environment, FileSystemLoader
+
+logger = logging.getLogger(__name__)
 
 if sys.platform == "darwin" and "DYLD_FALLBACK_LIBRARY_PATH" not in os.environ:
     for _prefix in ("/opt/homebrew/lib", "/usr/local/lib"):
@@ -29,9 +32,13 @@ def markdown_to_html(body_markdown: str) -> str:
 def diagram_data_uri(url: str | None) -> str | None:
     if not url:
         return None
-    with urllib.request.urlopen(url, timeout=30) as response:
-        raw = response.read()
-    encoded = base64.b64encode(raw).decode("ascii")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            raw = response.read()
+        encoded = base64.b64encode(raw).decode("ascii")
+    except Exception:
+        logger.warning("failed to fetch/encode diagram at %r; omitting", url, exc_info=True)
+        return None
     return f"data:image/svg+xml;base64,{encoded}"
 
 

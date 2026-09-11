@@ -1,6 +1,7 @@
 """Stateless custom-export clarification over course-scoped tools."""
 import json
 import logging
+from typing import Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
@@ -24,14 +25,14 @@ MAX_PROMPT_HISTORY_TURNS = 20
 
 class ExportPlanDraft(BaseModel):
     title: str
-    output_kind: str
-    length: str
+    output_kind: Literal["summary", "qa", "cheat_sheet", "custom"]
+    length: Literal["short", "medium", "long"]
     item_count: int | None = None
     notes: str | None = None
 
 
 class ClarifyResultDraft(BaseModel):
-    type: str
+    type: Literal["clarifying", "plan"]
     reply: str
     questions: list[str] = []
     plan: ExportPlanDraft | None = None

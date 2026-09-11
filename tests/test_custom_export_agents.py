@@ -82,6 +82,43 @@ def test_clarify_reasks_once_after_invalid_json():
     assert model.bind_tools.return_value.invoke.call_count == 2
 
 
+def test_clarify_reasks_once_after_invalid_output_kind():
+    _course()
+    model = _make_model(
+        AIMessage(content=json.dumps({
+            "type": "plan",
+            "reply": "Here is a plan.",
+            "questions": [],
+            "plan": {
+                "title": "Interview preparation",
+                "output_kind": "essay",
+                "length": "medium",
+                "item_count": 3,
+                "notes": None,
+            },
+        })),
+        AIMessage(content=json.dumps({
+            "type": "plan",
+            "reply": "Here is a plan.",
+            "questions": [],
+            "plan": {
+                "title": "Interview preparation",
+                "output_kind": "qa",
+                "length": "medium",
+                "item_count": 3,
+                "notes": None,
+            },
+        })),
+    )
+    with patch("app.agents.custom_export.clarify.get_chat_model", return_value=model), \
+        patch("app.agents.custom_export.clarify.build_export_tools", return_value=[]):
+        with SessionLocal() as db:
+            result = clarify_agent.clarify_export(db, _course(), 101, "Interview questions", [])
+    assert result["type"] == "plan"
+    assert result["plan"]["output_kind"] == "qa"
+    assert model.bind_tools.return_value.invoke.call_count == 2
+
+
 def test_clarify_budget_hit_raises():
     _course()
     model = _make_model(*[AIMessage(content="", tool_calls=[{
