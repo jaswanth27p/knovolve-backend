@@ -35,6 +35,14 @@ def _no_redis(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _web_search_off(monkeypatch):
+    """Keep the suite hermetic: all existing course-creation tests exercise the
+    flag-off path. Tests for the web path re-enable it explicitly."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "web_search_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def clean_db():
     yield
     with SessionLocal() as s:

@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     # Per-call timeout for every LLM/embedding request, so a hung provider call
     # fails (and retries/backoff) instead of blocking the graph indefinitely.
     llm_request_timeout_seconds: float = 120.0
+    # Web research for course-structure generation. When disabled, the outline
+    # and chapter nodes make exactly the LLM calls they made before this
+    # feature existed. Search/fetch each retry once, then degrade gracefully.
+    web_search_enabled: bool = True
+    web_search_max_results: int = 5
+    web_page_max_chars: int = 8000
+    web_research_max_tool_rounds: int = 4
+    web_request_timeout_seconds: float = 15.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.
     checkpoint_retention_days: int = 7
