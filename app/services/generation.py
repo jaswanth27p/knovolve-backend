@@ -202,7 +202,7 @@ def queue_generation_run(db: Session, user_id: int, course: Course) -> tuple[Cou
 
 
 def advance_run(db: Session, run: CourseGenerationRun, unit_id: str, status: str) -> None:
-    states = list(run.unit_states or [])
+    states = [dict(state) for state in (run.unit_states or [])]
     for state in states:
         if state.get("unit_id") == unit_id:
             state["status"] = status
