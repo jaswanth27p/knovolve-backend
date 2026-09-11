@@ -11,7 +11,7 @@ from app.models.enrollment import UserCourse
 from app.schemas.chat import (
     ChapterSummary, CourseSummary, LearnerContextBundle, ModuleSummary, RouteContext,
 )
-from app.services import progression
+from app.services import courses, progression
 from app.services.mastery import get_concept_statuses
 from app.services.tracking import get_dashboard
 
@@ -52,20 +52,24 @@ def build_context_bundle(db: Session, user_id: int, route: RouteContext | None) 
                 statuses = get_concept_statuses(db, user_id, course.id)
                 weak = sorted(name for name, status in statuses.items() if status == "weak")
                 strong = sorted(name for name, status in statuses.items() if status == "strong")
-                modules = db.query(Module).filter_by(course_id=course.id).order_by(Module.order).all()
-                current_course_modules = [
-                    ModuleSummary(
-                        id=m.id, title=m.title,
-                        chapters=[
-                            ChapterSummary(
-                                id=c.id, title=c.title,
-                                completed=progression._chapter_passed(db, c.id, user_id),
-                            )
-                            for c in db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()
-                        ],
+                modules = db.query(Module).filter(*courses.visible_module_filter(course.id, user_id)).order_by(Module.order).all()
+                current_course_modules = []
+                for m in modules:
+                    chapters = db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()
+                    if m.scope == "user" and not chapters:
+                        continue  # never surface an empty extension bucket
+                    current_course_modules.append(
+                        ModuleSummary(
+                            id=m.id, title=m.title,
+                            chapters=[
+                                ChapterSummary(
+                                    id=c.id, title=c.title,
+                                    completed=progression._chapter_passed(db, c.id, user_id),
+                                )
+                                for c in chapters
+                            ],
+                        )
                     )
-                    for m in modules
-                ]
 
     return LearnerContextBundle(
         in_progress_count=dashboard.in_progress_count,

@@ -2,7 +2,7 @@
 "Passed" is a coarser pass/fail gate than mastery's weak/developing/strong
 bands (app.services.mastery) — different question (is this CHAPTER done)
 from mastery's (is this CONCEPT understood). See design doc §6."""
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 from app.models.assignment import Assignment
 from app.models.attempt import AssignmentAttempt
@@ -100,7 +100,10 @@ def update_course_progress(db: Session, user_id: int, course_id: int) -> None:
 
     chapter_ids = [
         c.id for c in db.scalars(
-            select(Chapter).join(Module, Chapter.module_id == Module.id).where(Module.course_id == course_id)
+            select(Chapter).join(Module, Chapter.module_id == Module.id).where(
+                Module.course_id == course_id,
+                or_(Module.scope == "global", and_(Module.scope == "user", Module.user_id == user_id)),
+            )
         ).all()
     ]
     if not chapter_ids:

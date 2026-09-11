@@ -377,7 +377,7 @@ def list_public_courses(
 
     result = []
     for course in db.scalars(query).all():
-        modules = db.query(Module).filter_by(course_id=course.id).all()
+        modules = db.query(Module).filter(*visible_module_filter(course.id, None)).all()
         chapter_count = sum(
             db.query(Chapter).filter_by(module_id=m.id).count() for m in modules
         )

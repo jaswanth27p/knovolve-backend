@@ -46,6 +46,11 @@ def _module_assignment(db: Session, module_id: int) -> Assignment | None:
     )
 
 
+def _require_global_module(db: Session, module: Module) -> None:
+    if module.scope == "user":
+        raise HTTPException(status_code=404, detail="module assignment is not available for this module")
+
+
 def _serialize_assignment(assignment: Assignment, db: Session, user_id: int | None = None) -> AssignmentResponse:
     """`user_id` is only ever passed by the module-assignment fetch path (to
     include that learner's own topup questions alongside the shared base
@@ -188,9 +193,11 @@ def _ensure_topup_dispatched(db: Session, assignment: Assignment, user_id: int) 
         generate_module_topup_task.delay(assignment.id, user_id)  # pyright: ignore[reportFunctionMemberAccess]
 
 
-def create_module_assignment(db: Session, module: Module, user_id: int) -> AssignmentResponse:
-    """Fetch-or-dispatch the global assignment for `module`. 409s if any of
-    the module's chapters lack ready content.
+def create_module_assignment(db: Session, module: Module, user_id: int | None = None) -> AssignmentResponse:
+    """Fetch-or-dispatch the global assignment for `module`. 404s if `module`
+    is a user-scoped bucket (module assignments are global-only — the
+    Additional Chapters bucket has chapter assignments only, a product
+    decision); 409s if any of the module's chapters lack ready content.
 
     Also ensures `user_id`'s own topup exists (dispatch-only, see
     `_ensure_topup_dispatched`) and serializes with `user_id` so this
@@ -199,6 +206,7 @@ def create_module_assignment(db: Session, module: Module, user_id: int) -> Assig
     with no `user_id` at all, which leaked every learner's topup questions to
     every other learner AND returned a question set `submit_attempt` would
     then reject as not matching this learner's own assignment."""
+    _require_global_module(db, module)
     if not _module_chapters_ready(module, db):
         raise HTTPException(status_code=409, detail="not all chapters in this module have ready content")
 
@@ -209,7 +217,7 @@ def create_module_assignment(db: Session, module: Module, user_id: int) -> Assig
     if assignment is None:
         return AssignmentResponse(status="generating")
 
-    if assignment.status == "ready":
+    if assignment.status == "ready" and user_id is not None:
         _ensure_topup_dispatched(db, assignment, user_id)
 
     return _serialize_assignment(assignment, db, user_id=user_id)
@@ -227,6 +235,7 @@ def get_module_assignment(db: Session, module: Module, user_id: int) -> Assignme
     is what `status` has always meant here; a topup landing later doesn't
     change it, and there's no polling signal today for "new questions just
     landed" (that's a future UI, not built here)."""
+    _require_global_module(db, module)
     assignment = _module_assignment(db, module.id)
     if assignment is None or assignment.status == "failed":
         if not _module_chapters_ready(module, db):
@@ -242,15 +251,22 @@ def get_module_assignment(db: Session, module: Module, user_id: int) -> Assignme
     return _serialize_assignment(assignment, db, user_id=user_id)
 
 
-def get_assignment_for_course(db: Session, assignment_id: int, course: Course) -> Assignment:
-    """Look up the global-scope assignment `assignment_id`, 404ing if it
-    doesn't exist or doesn't belong to `course` (via `assignment_belongs_to_course`).
+def get_assignment_for_course(db: Session, assignment_id: int, course: Course,
+                              user_id: int | None = None) -> Assignment:
+    """Look up the assignment `assignment_id` visible to `user_id`: any
+    global-scope assignment, plus caller-owned user-scoped (chapter)
+    assignments — e.g. an extension chapter's assignment. 404s if it doesn't
+    exist or doesn't belong to `course` (via `assignment_belongs_to_course`).
     Deliberately does NOT check `assignment.status` — this mirrors the current
     get_assignment_attempt lookup, which doesn't gate on status either; only
     submit_assignment_attempt adds its own extra "status == ready" check on
     top of this lookup. Callers that need that gate must add it themselves."""
     assignment = db.scalar(
-        select(Assignment).where(Assignment.id == assignment_id, Assignment.scope == "global")
+        select(Assignment).where(
+            Assignment.id == assignment_id,
+            or_(Assignment.scope == "global",
+                and_(Assignment.scope == "user", Assignment.user_id == user_id)),
+        )
     )
     if assignment is None or not assignment_belongs_to_course(db, assignment, course.id):
         raise HTTPException(status_code=404, detail="assignment not found")

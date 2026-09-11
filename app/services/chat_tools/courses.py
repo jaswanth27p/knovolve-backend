@@ -61,7 +61,7 @@ def get_course_detail(db: Session, user_id: int, course_slug: str) -> dict:
     course = db.scalar(select(Course).where(Course.topic_slug == course_slug))
     if course is None:
         raise ChatToolError(f"No course found with slug '{course_slug}'.")
-    modules = db.query(Module).filter_by(course_id=course.id).all()
+    modules = db.query(Module).filter(*courses_service.visible_module_filter(course.id, None)).all()
     chapter_count = sum(db.query(Chapter).filter_by(module_id=m.id).count() for m in modules)
     enrollment = db.scalar(
         select(UserCourse).where(UserCourse.user_id == user_id, UserCourse.course_id == course.id)
@@ -77,14 +77,18 @@ def get_course_detail(db: Session, user_id: int, course_slug: str) -> dict:
 
 def get_course_modules(db: Session, user_id: int, course_slug: str) -> list[dict]:
     course = require_started_course(db, user_id, course_slug)
-    modules = db.query(Module).filter_by(course_id=course.id).order_by(Module.order).all()
-    return [
-        {
+    modules = db.query(Module).filter(*courses_service.visible_module_filter(course.id, user_id)) \
+        .order_by(Module.order).all()
+    result = []
+    for m in modules:
+        chapters = db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()
+        if m.scope == "user" and not chapters:
+            continue  # never surface an empty extension bucket
+        result.append({
             "id": m.id, "title": m.title,
             "chapters": [
                 {"id": c.id, "title": c.title, "completed": progression._chapter_passed(db, c.id, user_id)}
-                for c in db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()
+                for c in chapters
             ],
-        }
-        for m in modules
-    ]
+        })
+    return result

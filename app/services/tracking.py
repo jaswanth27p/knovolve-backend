@@ -6,7 +6,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.attempt import AssignmentAttempt
-from app.models.chapter_content import ChapterContent
 from app.models.course import Course, Module, Chapter
 from app.models.enrollment import UserCourse
 from app.models.learner_streak import LearnerStreak
@@ -25,18 +24,21 @@ def _serialize_tracked(db: Session, uc: UserCourse) -> TrackedCourseResponse:
     course = db.get(Course, uc.course_id)
     if course is None:
         raise HTTPException(status_code=500, detail="tracked course missing")
-    modules = db.query(Module).filter_by(course_id=course.id).all()
+    from app.services.courses import visible_module_filter
+    from app.services.progression import _resolve_relevant_content
+    modules = [
+        m for m in db.query(Module).filter(*visible_module_filter(course.id, uc.user_id)).all()
+        if m.scope != "user" or db.query(Chapter).filter_by(module_id=m.id).count() > 0
+    ]
     chapter_ids = [
         c.id for m in modules
         for c in db.query(Chapter).filter_by(module_id=m.id).all()
     ]
     ready_rows = 0
-    if chapter_ids:
-        ready_rows = db.query(ChapterContent).filter(
-            ChapterContent.chapter_id.in_(chapter_ids),
-            ChapterContent.scope == "global",
-            ChapterContent.status == "ready",
-        ).count()
+    for cid in chapter_ids:
+        content = _resolve_relevant_content(db, cid, uc.user_id)
+        if content is not None and content.status == "ready":
+            ready_rows += 1
     content_ready = len(chapter_ids) > 0 and ready_rows == len(chapter_ids)
     statuses = mastery.get_concept_statuses(db, uc.user_id, course.id).values()
     return TrackedCourseResponse(

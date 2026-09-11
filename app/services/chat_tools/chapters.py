@@ -11,19 +11,21 @@ from app.services.chat_tools._authz import require_started_course
 from app.services.chat_tools._errors import ChatToolError
 
 
-def _require_chapter_in_course(db: Session, course_id: int, chapter_id: int) -> Chapter:
+def _require_chapter_in_course(db: Session, course_id: int, chapter_id: int, user_id: int) -> Chapter:
     chapter = db.get(Chapter, chapter_id)
     if chapter is None:
         raise ChatToolError(f"No chapter {chapter_id}.")
     module = db.get(Module, chapter.module_id)
     if module is None or module.course_id != course_id:
         raise ChatToolError(f"Chapter {chapter_id} is not part of this course.")
+    if module.scope == "user" and module.user_id != user_id:
+        raise ChatToolError(f"Chapter {chapter_id} is not part of this course.")
     return chapter
 
 
 def get_chapter_progress(db: Session, user_id: int, course_slug: str, chapter_id: int) -> dict:
     course = require_started_course(db, user_id, course_slug)
-    chapter = _require_chapter_in_course(db, course.id, chapter_id)
+    chapter = _require_chapter_in_course(db, course.id, chapter_id, user_id)
 
     version_count = db.query(ChapterContent).filter(
         ChapterContent.chapter_id == chapter_id,
@@ -60,7 +62,7 @@ def get_chapter_content(
     db: Session, user_id: int, course_slug: str, chapter_id: int, version: int | None = None,
 ) -> dict:
     course = require_started_course(db, user_id, course_slug)
-    _require_chapter_in_course(db, course.id, chapter_id)
+    _require_chapter_in_course(db, course.id, chapter_id, user_id)
 
     if version is None:
         content = progression._resolve_relevant_content(db, chapter_id, user_id)

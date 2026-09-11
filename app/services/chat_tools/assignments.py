@@ -20,9 +20,19 @@ def _course_for_assignment(db: Session, assignment: Assignment) -> Course:
     return course
 
 
+def _assignment_visible_to_user(assignment: Assignment, user_id: int) -> bool:
+    """User-scoped (extension-bucket) assignments are only visible to their
+    owner; global ones are visible to everyone."""
+    return assignment.scope == "global" or (
+        assignment.scope == "user" and assignment.user_id == user_id
+    )
+
+
 def get_assignment(db: Session, user_id: int, assignment_id: int) -> dict:
     assignment = db.get(Assignment, assignment_id)
     if assignment is None:
+        raise ChatToolError(f"No assignment {assignment_id}.")
+    if not _assignment_visible_to_user(assignment, user_id):
         raise ChatToolError(f"No assignment {assignment_id}.")
     course = _course_for_assignment(db, assignment)
     require_started(db, user_id, course)
@@ -35,6 +45,8 @@ def get_assignment(db: Session, user_id: int, assignment_id: int) -> dict:
 def list_assignment_attempts(db: Session, user_id: int, assignment_id: int) -> list[dict]:
     assignment = db.get(Assignment, assignment_id)
     if assignment is None:
+        raise ChatToolError(f"No assignment {assignment_id}.")
+    if not _assignment_visible_to_user(assignment, user_id):
         raise ChatToolError(f"No assignment {assignment_id}.")
     course = _course_for_assignment(db, assignment)
     require_started(db, user_id, course)
@@ -84,6 +96,8 @@ def get_question(db: Session, user_id: int, question_id: int) -> dict:
     assignment = db.get(Assignment, question.assignment_id)
     if assignment is None:
         raise ChatToolError(f"No question {question_id}.")
+    if not _assignment_visible_to_user(assignment, user_id):
+        raise ChatToolError(f"No question {question_id}.")
     course = _course_for_assignment(db, assignment)
     require_started(db, user_id, course)
     return {
@@ -115,7 +129,7 @@ def get_chapter_assignment(
     db: Session, user_id: int, course_slug: str, chapter_id: int, version: int | None = None,
 ) -> dict:
     course = require_started_course(db, user_id, course_slug)
-    _require_chapter_in_course(db, course.id, chapter_id)
+    _require_chapter_in_course(db, course.id, chapter_id, user_id)
     content = _content_for_version(db, chapter_id, user_id, version)
 
     assignment = db.scalar(

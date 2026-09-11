@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.models.chapter_content import ChapterContent
 from app.models.course import Chapter, Concept, Module
+from app.services import courses
 from app.services.chat_tools._authz import require_started_course
 from app.services.chat_tools._errors import ChatToolError
 from app.services.mastery import get_concept_statuses
@@ -15,7 +16,9 @@ def get_weak_concepts_by_course(db: Session, user_id: int, course_slug: str) -> 
 
 def get_weak_concepts_by_module(db: Session, user_id: int, course_slug: str, module_id: int) -> dict[str, str]:
     course = require_started_course(db, user_id, course_slug)
-    module = db.query(Module).filter_by(id=module_id, course_id=course.id).first()
+    module = db.query(Module).filter(
+        *courses.visible_module_filter(course.id, user_id), Module.id == module_id,
+    ).first()
     if module is None:
         raise ChatToolError(f"No module {module_id} in course '{course_slug}'.")
     chapter_ids = [c.id for c in db.query(Chapter).filter_by(module_id=module.id).all()]
@@ -35,6 +38,8 @@ def get_weak_concepts_by_chapter(db: Session, user_id: int, course_slug: str, ch
     module = db.get(Module, chapter.module_id)
     if module is None or module.course_id != course.id:
         raise ChatToolError(f"No chapter {chapter_id} in course '{course_slug}'.")
+    if module.scope == "user" and module.user_id != user_id:
+        raise ChatToolError(f"No chapter {chapter_id} in course '{course_slug}'.")
     names_in_chapter = set(db.scalars(select(Concept.name).where(Concept.chapter_id == chapter_id)).all())
     statuses = get_concept_statuses(db, user_id, course.id)
     return {name: status for name, status in statuses.items() if name in names_in_chapter}
@@ -52,7 +57,9 @@ def get_recurring_weak_concepts(
     course = require_started_course(db, user_id, course_slug)
     chapter_ids = [
         c.id for c in db.scalars(
-            select(Chapter).join(Module, Chapter.module_id == Module.id).where(Module.course_id == course.id)
+            select(Chapter).join(Module, Chapter.module_id == Module.id).where(
+                *courses.visible_module_filter(course.id, user_id),
+            )
         ).all()
     ]
     tag_occurrences: dict[str, int] = {}

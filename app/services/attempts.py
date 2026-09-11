@@ -34,7 +34,7 @@ def submit_attempt(db: Session, user_id: int, course: Course, assignment_id: int
     checks reproduce the old combined
     `assignment.status != "ready" or not _assignment_belongs_to_course(...)`
     condition's exact set of 404 outcomes."""
-    assignment = assignments.get_assignment_for_course(db, assignment_id, course)
+    assignment = assignments.get_assignment_for_course(db, assignment_id, course, user_id)
     if assignment.status != "ready":
         raise HTTPException(status_code=404, detail="assignment not found")
 
@@ -97,7 +97,7 @@ def _serialize_attempt(attempt: AssignmentAttempt, assignment: Assignment, db: S
         if content is not None:
             chapter_id = content.chapter_id
             if passed:
-                next_chapter_id = courses.get_next_chapter_id(db, chapter_id)
+                next_chapter_id = courses.get_next_chapter_id(db, chapter_id, user_id)
 
     return AttemptResponse(
         status="graded",
@@ -120,7 +120,7 @@ def list_attempts(db: Session, user_id: int, course: Course, assignment_id: int)
     """This user's own attempts on `assignment_id`, most recent first — drives
     the assignment page's "you've already attempted this" default view and
     its full attempt history."""
-    assignment = assignments.get_assignment_for_course(db, assignment_id, course)
+    assignment = assignments.get_assignment_for_course(db, assignment_id, course, user_id)
     attempts = db.scalars(
         select(AssignmentAttempt)
         .where(AssignmentAttempt.assignment_id == assignment.id, AssignmentAttempt.user_id == user_id)
@@ -143,7 +143,7 @@ def get_attempt(db: Session, user_id: int, course: Course, assignment_id: int,
     via `assignments.get_assignment_for_course` does NOT gate on status
     (unlike `submit_attempt` above) — the current fetch endpoint never
     checked status either, so no extra gate is added here."""
-    assignment = assignments.get_assignment_for_course(db, assignment_id, course)
+    assignment = assignments.get_assignment_for_course(db, assignment_id, course, user_id)
     attempt = db.get(AssignmentAttempt, attempt_id)
     if attempt is None or attempt.assignment_id != assignment.id or attempt.user_id != user_id:
         raise HTTPException(status_code=404, detail="attempt not found")
