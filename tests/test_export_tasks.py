@@ -69,3 +69,34 @@ def test_completed_export_is_not_processed_again():
     with patch("app.services.exports.gather_course_payload") as mock_gather:
         run_export_task(job_id)  # pyright: ignore[reportCallIssue]
     mock_gather.assert_not_called()
+
+
+def test_custom_export_generates_markdown_and_pdf():
+    job_id = _seed_job("custom")
+    with SessionLocal() as db:
+        job = db.get(ExportJob, job_id)
+        assert job is not None
+        job.params = {
+            "brief": "Short summary",
+            "plan": {
+                "title": "Short summary",
+                "output_kind": "summary",
+                "length": "short",
+                "item_count": None,
+                "notes": None,
+            },
+        }
+        db.commit()
+    with patch("app.tasks.export_tasks.generate_custom_markdown", return_value="# Summary") as mock_generate, \
+        patch("app.documents.render.render_custom_pdf", return_value=b"%PDF-custom%"), \
+        patch("app.tasks.export_tasks.ensure_bucket"), \
+        patch("app.tasks.export_tasks.upload_object") as mock_upload:
+        run_export_task(job_id)  # pyright: ignore[reportCallIssue]
+
+    mock_generate.assert_called_once()
+    assert mock_upload.call_args.args[1] == b"%PDF-custom%"
+    with SessionLocal() as db:
+        job = db.get(ExportJob, job_id)
+        assert job is not None
+        assert job.status == "succeeded"
+        assert job.result_key is not None

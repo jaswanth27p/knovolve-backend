@@ -2,14 +2,18 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.custom_export.clarify import clarify_export
 from app.documents.render import diagram_data_uri, markdown_to_html
 from app.models.assignment import AssignmentQuestion
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter, Course, Module
 from app.models.export import ExportJob
+from app.schemas.chat import ChatTurn
+from app.schemas.export import ExportPlan
 from app.services.assignments import _chapter_assignment, _module_assignment
 from app.storage import s3
 
@@ -410,6 +414,16 @@ def gather_assignments_payload(db: Session, course: Course, user_id: int, full: 
 def create_export_job(
     db: Session, user_id: int, course: Course, kind: str, params: dict | None = None,
 ) -> ExportJob:
+    if kind == "custom":
+        brief = (params or {}).get("brief")
+        plan = (params or {}).get("plan")
+        if not isinstance(brief, str) or not brief.strip():
+            raise HTTPException(status_code=400, detail="custom export requires a brief")
+        try:
+            validated_plan = ExportPlan.model_validate(plan)
+        except ValidationError:
+            raise HTTPException(status_code=400, detail="custom export requires a valid plan")
+        params = {"brief": brief.strip(), "plan": validated_plan.model_dump()}
     require_export_ready(db, course, user_id, kind)
     now = _now()
     job = ExportJob(
@@ -425,6 +439,13 @@ def create_export_job(
     db.commit()
     db.refresh(job)
     return job
+
+
+def run_clarify(
+    db: Session, user_id: int, course: Course, message: str, history: list[ChatTurn],
+) -> dict:
+    require_export_ready(db, course, user_id, "custom")
+    return clarify_export(db, course, user_id, message, history)
 
 
 def get_export_job(db: Session, user_id: int, course: Course, export_id: int) -> ExportJob:

@@ -250,3 +250,11 @@ def test_missing_global_content_blocks_every_kind():
                 svc.require_export_ready(db, course, 51, kind)
             assert exc.value.status_code == 409
             assert _detail_code(exc) == "content_not_ready"
+
+
+def test_custom_export_requires_brief_and_plan():
+    with SessionLocal() as db:
+        course = db.query(Course).first()
+        with pytest.raises(HTTPException) as exc:
+            svc.create_export_job(db, 51, course, "custom", None)  # pyright: ignore[reportArgumentType]
+        assert exc.value.status_code == 400

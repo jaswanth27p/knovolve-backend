@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 
 from celery import Task
 
+from app.agents.custom_export.generate import generate_custom_markdown
 from app.db import SessionLocal
 from app.documents import render
+from app.documents.render import markdown_to_html
 from app.models.course import Course
 from app.models.export import ExportJob
 from app.services import exports as export_service
@@ -42,6 +44,18 @@ def run_export_task(self: Task, export_id: int) -> None:
                     db, course, job.user_id, full=(job.kind == "full_assignments")
                 )
                 pdf_bytes = render.render_assignments_pdf(payload)
+            elif job.kind == "custom":
+                custom_params = job.params or {}
+                custom_markdown = generate_custom_markdown(
+                    db, course, job.user_id, custom_params["brief"], custom_params["plan"]
+                )
+                payload = {
+                    "title": custom_params["plan"]["title"],
+                    "subtitle": "Custom export",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "body_html": markdown_to_html(custom_markdown),
+                }
+                pdf_bytes = render.render_custom_pdf(payload)
             else:
                 raise ValueError(f"Unsupported export kind: {job.kind}")
             key = f"exports/{course.topic_slug}/{job.id}.pdf"

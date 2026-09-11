@@ -1,6 +1,9 @@
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel
+
+from pydantic import BaseModel, Field
+
+from app.schemas.chat import ChatTurn, MAX_HISTORY_TURNS, MAX_MESSAGE_CHARS
 
 
 class CreateExportRequest(BaseModel):
@@ -34,3 +37,23 @@ class GenerationRunResponse(BaseModel):
     unit_states: list[dict[str, Any]] = []
     error: str | None = None
     action: str | None = None
+
+
+class ExportPlan(BaseModel):
+    title: str
+    output_kind: Literal["summary", "qa", "cheat_sheet", "custom"]
+    length: Literal["short", "medium", "long"]
+    item_count: int | None = None
+    notes: str | None = None
+
+
+class ClarifyRequest(BaseModel):
+    message: str = Field(..., max_length=MAX_MESSAGE_CHARS)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
+
+
+class ClarifyResponse(BaseModel):
+    type: Literal["clarifying", "plan"]
+    reply: str
+    questions: list[str] = []
+    plan: ExportPlan | None = None
