@@ -23,6 +23,7 @@ celery_app.conf.include = [
     "app.tasks.evaluation_tasks",
     "app.tasks.chapter_content_tasks",
     "app.tasks.auth_tasks",
+    "app.tasks.export_tasks",
 ]
 
 # Periodic hygiene: revoked/expired refresh_tokens rows otherwise accumulate
