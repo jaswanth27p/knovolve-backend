@@ -1,10 +1,19 @@
 """Markdown-to-PDF rendering for exports and generated course documents."""
 import base64
+import os
+import sys
 import urllib.request
 from pathlib import Path
 
 import markdown
 from jinja2 import Environment, FileSystemLoader
+
+if sys.platform == "darwin" and "DYLD_FALLBACK_LIBRARY_PATH" not in os.environ:
+    for _prefix in ("/opt/homebrew/lib", "/usr/local/lib"):
+        if os.path.isdir(_prefix):
+            os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = _prefix
+            break
+
 from weasyprint import HTML
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
