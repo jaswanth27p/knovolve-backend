@@ -11,6 +11,7 @@ from app.models.enrollment import UserCourse
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.learner_streak import LearnerStreak
+from app.models.export import CourseGenerationRun, ExportJob
 
 
 class _NullRedis:
@@ -40,7 +41,8 @@ def clean_db():
         s.execute(text(
             "TRUNCATE refresh_tokens, learner_streaks, users, assignment_answers, assignment_attempts, "
             "assignment_questions, assignment_user_topups, assignments, chapter_content_sections, chapter_contents, "
-            "concept_edges, concepts, chapters, modules, course_jobs, course_extension_jobs, courses, user_courses, "
+            "concept_edges, concepts, chapters, modules, course_jobs, course_extension_jobs, "
+            "export_jobs, course_generation_runs, courses, user_courses, "
             "checkpoint_writes, checkpoint_blobs, checkpoints RESTART IDENTITY CASCADE"
         ))
         s.commit()

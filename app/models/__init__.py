@@ -16,6 +16,7 @@ from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUser
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.enrollment import UserCourse
 from app.models.learner_streak import LearnerStreak
+from app.models.export import CourseGenerationRun, ExportJob
 
 __all__ = [
     "User",
@@ -36,4 +37,6 @@ __all__ = [
     "AssignmentAnswer",
     "UserCourse",
     "LearnerStreak",
+    "ExportJob",
+    "CourseGenerationRun",
 ]
