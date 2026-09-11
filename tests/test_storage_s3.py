@@ -42,3 +42,16 @@ def test_upload_object_calls_put_object():
 
 def test_get_public_url_uses_public_endpoint_and_bucket():
     assert s3.get_public_url("images/x.svg") == "http://localhost:9000/knovolve/images/x.svg"
+
+
+def test_presign_get_url_requests_short_lived_private_download():
+    mock_client = MagicMock()
+    mock_client.generate_presigned_url.return_value = "https://signed.example/export.pdf"
+    with patch("app.storage.s3._client", return_value=mock_client):
+        url = s3.presign_get_url("exports/course-1/9.pdf")
+
+    assert url == "https://signed.example/export.pdf"
+    assert mock_client.generate_presigned_url.call_args.args[0] == "get_object"
+    params = mock_client.generate_presigned_url.call_args.kwargs["Params"]
+    assert params == {"Bucket": "knovolve", "Key": "exports/course-1/9.pdf"}
+    assert mock_client.generate_presigned_url.call_args.kwargs["ExpiresIn"] == 300

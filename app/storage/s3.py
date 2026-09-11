@@ -51,3 +51,11 @@ def upload_object(key: str, data: bytes, content_type: str) -> None:
 
 def get_public_url(key: str) -> str:
     return f"{settings.s3_public_endpoint}/{settings.s3_bucket}/{key}"
+
+
+def presign_get_url(key: str, expires: int = 300) -> str:
+    return _client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.s3_bucket, "Key": key},
+        ExpiresIn=expires,
+    )
