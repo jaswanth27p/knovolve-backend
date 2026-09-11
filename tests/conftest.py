@@ -43,6 +43,14 @@ def _web_search_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _chapter_research_off(monkeypatch):
+    """Keep the suite hermetic: chapter-content research would otherwise make
+    real web calls. Tests for it patch the same symbol themselves."""
+    from app.agents.chapter_content import research as chapter_research
+    monkeypatch.setattr(chapter_research, "run_web_research", lambda *args, **kwargs: "")
+
+
+@pytest.fixture(autouse=True)
 def clean_db():
     yield
     with SessionLocal() as s:

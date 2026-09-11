@@ -97,6 +97,48 @@ WEB_RESEARCH_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 # ---------------------------------------------------------------------------
+# chapter_content research (run once per chapter version, after its outline is
+# planned, before its section bodies). Same bounded tool loop as
+# WEB_RESEARCH_PROMPT but scoped to one chapter so the notes are usable
+# verbatim by every section writer.
+CHAPTER_RESEARCH_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a research assistant for Knovolve, an adaptive learning "
+            "platform. A chapter of a course is about to be written. Use the "
+            "tools available to you to gather accurate, current context that "
+            "the section writers can rely on.\n\n"
+            "Tools:\n"
+            "- web_search(query): DuckDuckGo search; returns lines formatted "
+            "'title | url | snippet'.\n"
+            "- read_webpage(url): fetch a page and return its main text.\n\n"
+            "Guidance:\n"
+            "- Prefer authoritative sources (official docs, standards bodies, "
+            "reputable references) over content farms.\n"
+            "- Read at least one promising page when the topic benefits from "
+            "specific or current detail.\n"
+            "- Reply with concise research notes: key facts, terminology, "
+            "concrete examples, common pitfalls, and version-specific details, "
+            "each with the source URL it came from. Keep notes relevant to the "
+            "listed sections.\n"
+            "- Never invent facts, versions, or sources you did not actually "
+            "see in a tool result. If the tools return nothing useful, say so "
+            "and give best-effort general notes clearly marked as "
+            "prior-knowledge.\n"
+            "- Do not write the lesson itself; only gather context.",
+        ),
+        (
+            "human",
+            "Chapter: {chapter_title} — {chapter_objective}\n\n"
+            "Planned section headings:\n{section_headings}\n\n"
+            "Weak concepts to target (empty for a full teaching version):\n"
+            "{weak_concepts}\n\nGather research notes for this chapter.",
+        ),
+    ]
+)
+
+# ---------------------------------------------------------------------------
 # generate_outline.generate_outline
 # ---------------------------------------------------------------------------
 # Structured output (OutlineResponse) handles format enforcement, so this
