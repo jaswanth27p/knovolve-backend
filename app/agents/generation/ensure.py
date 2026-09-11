@@ -123,6 +123,7 @@ def ensure_chapter_content(db: Session, chapter: Chapter) -> None:
         content.status = "ready"
         content.updated_at = _now()
         db.commit()
+        _finalize_pending_diagrams(db, content)
 
 
 def ensure_chapter_assignment(db: Session, content: ChapterContent) -> None:

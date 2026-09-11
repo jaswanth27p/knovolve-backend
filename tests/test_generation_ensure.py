@@ -125,6 +125,47 @@ def test_failed_diagram_does_not_block_ready_chapter():
         assert section.diagram_status == "failed"
 
 
+def test_ensure_chapter_content_finalizes_pending_diagram_on_existing_sections():
+    chapter_id, _ = _seed_chapter(user_id=76, slug="generation-resume-diagram")
+    with SessionLocal() as db:
+        now = _now()
+        content = ChapterContent(
+            chapter_id=chapter_id, version=1, scope="global", status="generating",
+            outline=[{"heading": "One", "objective": "o", "kind": "teaching"}],
+            created_at=now, updated_at=now,
+        )
+        db.add(content)
+        db.commit()
+        section = ChapterContentSection(
+            chapter_content_id=content.id, order=0, heading="One", kind="teaching",
+            body_markdown="body", examples=[],
+            diagram_spec={"nodes": [], "edges": []}, diagram_status="pending",
+        )
+        db.add(section)
+        db.commit()
+        content_id, section_id = content.id, section.id
+
+        from app.models.course import Chapter as ChapterModel
+        chapter = db.get(ChapterModel, chapter_id)
+        assert chapter is not None
+        with patch("app.agents.generation.ensure.render_and_upload_diagram",
+                   return_value="https://example.com/diagram.png"):
+            ensure_module.ensure_chapter_content(db, chapter)
+            content = db.get(ChapterContent, content_id)
+            assert content is not None
+            assert content.status == "ready"
+            section = db.get(ChapterContentSection, section_id)
+            assert section is not None
+            assert section.diagram_status == "ready"
+            assert section.diagram_image_url == "https://example.com/diagram.png"
+
+            ensure_module.ensure_chapter_content(db, chapter)
+            section = db.get(ChapterContentSection, section_id)
+            assert section is not None
+            assert section.diagram_status == "ready"
+            assert section.diagram_image_url == "https://example.com/diagram.png"
+
+
 def test_ensure_chapter_assignment_requires_ready_and_calls_generator():
     chapter_id, _ = _seed_chapter(user_id=74, slug="generation-assignment")
     with SessionLocal() as db:
