@@ -182,10 +182,12 @@ GENERATE_CHAPTERS_PROMPT = ChatPromptTemplate.from_messages(
             "Module objective: {module_objective}\n\n"
             "Existing chapter titles already used by OTHER modules of this "
             "course:\n{existing_titles}\n\n"
-            "If the list above is not empty, none of your chapter titles may "
-            "duplicate an entry in it — every chapter title in the whole "
-            "course must be unique. Break this module into chapters (title, "
-            "objective, order).",
+            "Web research notes (may be the placeholder '(no web research "
+            "available)'; if so, ignore them):\n{research_notes}\n\n"
+            "If the title list above is not empty, none of your chapter "
+            "titles may duplicate an entry in it — every chapter title in the "
+            "whole course must be unique. Break this module into chapters "
+            "(title, objective, order).",
         ),
     ]
 )
