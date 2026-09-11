@@ -14,6 +14,8 @@ from app.agents.chapter_content.generate import _get_or_create_content
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
 from app.agents.chapter_content.nodes.generate_section_outline import generate_section_outline
 from app.agents.chapter_content.remediate import remediate_chapter
+from app.agents.chapter_content.research import ensure_chapter_research
+from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
 from app.services.assignments import _chapter_assignment, _module_assignment
@@ -75,6 +77,7 @@ def ensure_chapter_content(db: Session, chapter: Chapter) -> None:
             content.outline = [entry.model_dump() for entry in outline]
             content.updated_at = _now()
             db.commit()
+    ensure_chapter_research(db, chapter, content)
     done_orders = {
         order
         for order, in db.query(ChapterContentSection.order)
@@ -85,7 +88,8 @@ def ensure_chapter_content(db: Session, chapter: Chapter) -> None:
         if order in done_orders:
             continue
         result = generate_chapter_section(
-            chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"]
+            chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"],
+            content.research_notes or FALLBACK_RESEARCH_NOTES,
         )
         diagram_spec = _diagram_spec_dict(result.diagram_spec)
         section = ChapterContentSection(

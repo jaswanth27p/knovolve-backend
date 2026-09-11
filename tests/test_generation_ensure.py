@@ -302,3 +302,27 @@ def test_ensure_module_assignment_calls_generator():
                   return_value=MagicMock(status="ready")):
             ensure_module.ensure_module_assignment(db, 42)
         mock_gen.assert_called_once_with(42, db)
+
+
+def test_ensure_chapter_content_runs_research_and_passes_notes():
+    chapter_id, _ = _seed_chapter(user_id=74, slug="generation-ensure-research")
+    outline = [MagicMock(heading="One", objective="o", kind="intro")]
+    outline[0].model_dump.return_value = {"heading": "One", "objective": "o", "kind": "intro"}
+    section_result = MagicMock()
+    section_result.body_markdown = "body"
+    section_result.examples = []
+    section_result.diagram_spec = None
+
+    with SessionLocal() as db:
+        chapter = db.get(Chapter, chapter_id)
+        assert chapter is not None
+        with patch("app.agents.generation.ensure.generate_section_outline", return_value=outline), \
+            patch("app.agents.generation.ensure.generate_chapter_section", return_value=section_result) as mock_section, \
+            patch("app.agents.chapter_content.research.get_chat_model"), \
+            patch("app.agents.chapter_content.research.run_web_research", return_value="NOTES") as mock_research:
+            ensure_module.ensure_chapter_content(db, chapter)
+
+        mock_research.assert_called_once()
+        assert mock_section.call_args.args[5] == "NOTES"
+        content = db.query(ChapterContent).filter_by(chapter_id=chapter_id).one()
+        assert content.research_notes == "NOTES"
