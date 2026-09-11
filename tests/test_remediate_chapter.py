@@ -177,6 +177,9 @@ def test_remediation_runs_research_with_weak_concepts_and_passes_notes():
             remediate_chapter(chapter_id, user_id, ["recursion-base-case"], attempt_id, db)
 
     mock_research.assert_called_once()
+    research_messages = mock_research.call_args.args[1]
+    research_blob = "\n".join(m.content for m in research_messages)
+    assert "recursion-base-case" in research_blob
     assert mock_section.call_args.args[5] == "NOTES"
     with SessionLocal() as db:
         content = db.query(ChapterContent).filter_by(

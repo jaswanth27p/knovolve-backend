@@ -127,6 +127,7 @@ def remediate_chapter(
             except IntegrityError:
                 db.rollback()  # a concurrent redelivery generated this exact section first
 
+        content.error = None  # ensure_chapter_research may db.refresh() the old failure back in
         content.status = "ready"
         content.updated_at = datetime.now(timezone.utc)
         db.commit()
