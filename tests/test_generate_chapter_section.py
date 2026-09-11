@@ -107,4 +107,6 @@ def test_missing_research_notes_fall_back_to_placeholder():
         generate_chapter_section("Ch", "obj", "Heading", "sec obj", "intro")
 
     messages = structured.invoke.call_args.args[0]
-    assert any("(no web research available)" in m.content for m in messages)
+    assert any(
+        "knowledge):\n(no web research available)\n\n" in m.content for m in messages
+    )
