@@ -1,7 +1,6 @@
 """Full-course readiness computation and race-safe completion-run planning."""
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -116,11 +115,11 @@ def _chapter_inputs(db: Session, chapter: Chapter, user_id: int) -> list[dict]:
     return units
 
 
-def _module_inputs(db: Session, course: Course, module: Module) -> list[dict]:
+def _module_inputs(db: Session, module: Module, user_id: int) -> list[dict]:
     units = []
     chapters = db.query(Chapter).filter_by(module_id=module.id).order_by(Chapter.order).all()
     for chapter in chapters:
-        units.extend(_chapter_inputs(db, chapter, module.user_id or 0))
+        units.extend(_chapter_inputs(db, chapter, user_id))
     # Module assignments are global-only and are generated only from complete
     # chapter content, matching the existing module-assignment invariant.
     if module.scope == "global" and _module_chapters_ready(module, db):
@@ -137,7 +136,7 @@ def _module_inputs(db: Session, course: Course, module: Module) -> list[dict]:
 def plan_units(db: Session, course: Course, user_id: int) -> list[dict]:
     units = []
     for module in export_service.global_modules(db, course):
-        units.extend(_module_inputs(db, course, module))
+        units.extend(_module_inputs(db, module, user_id))
     bucket = export_service.user_bucket(db, course, user_id)
     if bucket is not None:
         for chapter in db.query(Chapter).filter_by(module_id=bucket.id).order_by(Chapter.order).all():

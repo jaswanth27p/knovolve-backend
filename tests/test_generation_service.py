@@ -1,8 +1,7 @@
 from datetime import datetime, timezone
-from fastapi import HTTPException
-import pytest
 from app.db import SessionLocal
 from app.models.assignment import Assignment
+from app.models.attempt import AssignmentAttempt
 from app.models.chapter_content import ChapterContent
 from app.models.course import Course, Module, Chapter
 from app.models.user import User
@@ -32,6 +31,54 @@ def _seed_planning_course(slug="generation-planning"):
         db.commit()
         db.refresh(course)
         return course.id
+
+
+def _seed_global_chapter_with_remediation(user_id=83, slug="generation-global-remediation"):
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        db.add(User(id=user_id, email=f"generation-remediation-{user_id}@example.com", password_hash="x"))
+        course = Course(topic_slug=slug, topic_raw="Remediation",
+                        topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1, scope="global")
+        db.add(module)
+        db.commit()
+        chapter = Chapter(module_id=module.id, title="C", objective="o", order=1, scope="global")
+        db.add(chapter)
+        db.commit()
+        assignment = Assignment(level="module", module_id=module.id, scope="global", status="ready",
+                                created_at=now, updated_at=now)
+        db.add(assignment)
+        db.commit()
+        attempt = AssignmentAttempt(assignment_id=assignment.id, user_id=user_id, status="graded",
+                                    overall_score=0.0, created_at=now, updated_at=now)
+        db.add(attempt)
+        db.commit()
+        base = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
+                              outline=[], created_at=now, updated_at=now)
+        remediation = ChapterContent(chapter_id=chapter.id, version=2, scope="user", user_id=user_id,
+                                     status="generating", outline=[],
+                                     remediation_source_attempt_id=attempt.id,
+                                     created_at=now, updated_at=now)
+        db.add_all([base, remediation])
+        db.commit()
+        db.refresh(course)
+        return course.id, remediation.id, chapter.id
+
+
+def test_plan_includes_user_remediation_for_global_chapter():
+    course_id, remediation_id, chapter_id = _seed_global_chapter_with_remediation()
+    with SessionLocal() as db:
+        from app.models.course import Course as CourseModel
+        course = db.get(CourseModel, course_id)
+        assert course is not None
+        units = svc.plan_units(db, course, 83)
+        unit_ids = [u["unit_id"] for u in units]
+        assert f"remediation_content:{remediation_id}" in unit_ids
+        remediation_unit = next(u for u in units if u["unit_id"] == f"remediation_content:{remediation_id}")
+        assert remediation_unit["kind"] == "remediation_content"
+        assert remediation_unit["chapter_id"] == chapter_id
 
 
 def test_plan_includes_ready_assignment_work_and_omits_unready_module_assignment():
