@@ -244,3 +244,39 @@ def test_replaying_already_ready_content_does_not_redispatch_assignment():
         list(stream_chapter_content(chapter, db, user_id=1))
 
     mock_assignment_task.delay.assert_not_called()
+
+
+def test_streaming_runs_research_once_and_passes_notes_to_sections():
+    chapter = _make_chapter("stream-cc-research")
+    outline = [SectionOutlineDraft(heading="H", objective="o", kind="intro", order=1)]
+    section_response = ChapterSectionResponse(body_markdown="b", examples=[], diagram_spec=None)
+
+    with SessionLocal() as db, \
+         patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline), \
+         patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=section_response) as mock_section, \
+         patch("app.agents.chapter_content.generate.generate_chapter_assignment_task"), \
+         patch("app.agents.chapter_content.research.get_chat_model"), \
+         patch("app.agents.chapter_content.research.run_web_research", return_value="NOTES") as mock_research:
+        list(stream_chapter_content(chapter, db, user_id=1))
+
+    mock_research.assert_called_once()
+    assert mock_section.call_args.args[5] == "NOTES"
+    with SessionLocal() as db:
+        content = db.query(ChapterContent).filter_by(chapter_id=chapter.id).one()
+        assert content.research_notes == "NOTES"
+
+
+def test_streaming_still_generates_when_research_fails():
+    chapter = _make_chapter("stream-cc-research-fail")
+    outline = [SectionOutlineDraft(heading="H", objective="o", kind="intro", order=1)]
+    section_response = ChapterSectionResponse(body_markdown="b", examples=[], diagram_spec=None)
+
+    with SessionLocal() as db, \
+         patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline), \
+         patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=section_response), \
+         patch("app.agents.chapter_content.generate.generate_chapter_assignment_task"), \
+         patch("app.agents.chapter_content.research.get_chat_model"), \
+         patch("app.agents.chapter_content.research.run_web_research", side_effect=RuntimeError("down")):
+        events = list(stream_chapter_content(chapter, db, user_id=1))
+
+    assert events[-1]["type"] == "done"
