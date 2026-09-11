@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import cast
+from unittest.mock import patch
 from fastapi import HTTPException
 import pytest
 from sqlalchemy import select
@@ -258,3 +259,46 @@ def test_custom_export_requires_brief_and_plan():
         with pytest.raises(HTTPException) as exc:
             svc.create_export_job(db, 51, course, "custom", None)  # pyright: ignore[reportArgumentType]
         assert exc.value.status_code == 400
+
+
+def test_retry_export_job_reuses_params_and_rejects_non_failed():
+    course_id = _seed_gate_course("export-retry-service")
+    with SessionLocal() as db:
+        course = db.get(Course, course_id)
+        assert course is not None
+        plan = {
+            "title": "Custom doc",
+            "output_kind": "summary",
+            "length": "short",
+            "item_count": None,
+            "notes": None,
+        }
+        failed = svc.create_export_job(db, 51, course, "custom", {"brief": "summarize", "plan": plan})
+        failed.status = "failed"
+        db.commit()
+
+        clone = svc.retry_export_job(db, 51, course, failed.id)
+        assert clone.id != failed.id
+        assert clone.kind == "custom"
+        assert clone.params is not None
+        assert clone.params["brief"] == "summarize"
+        assert clone.params["plan"]["title"] == "Custom doc"
+
+        clone.status = "succeeded"
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            svc.retry_export_job(db, 51, course, clone.id)
+        assert exc.value.status_code == 409
+        assert _detail_code(exc) == "not_retryable"
+
+
+def test_run_clarify_wraps_agent_parse_failure_as_retryable_502():
+    course_id = _seed_gate_course("export-clarify-failure")
+    with SessionLocal() as db:
+        course = db.get(Course, course_id)
+        assert course is not None
+        with patch.object(svc, "clarify_export", side_effect=ValueError("bad json")):
+            with pytest.raises(HTTPException) as exc:
+                svc.run_clarify(db, 51, course, "summarize", [])
+        assert exc.value.status_code == 502
+        assert _detail_code(exc) == "clarify_failed"

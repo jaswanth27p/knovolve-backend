@@ -43,7 +43,7 @@
 </ol>
 
 {% for module in modules %}
-<h2>{{ module.title }}{% if module.is_additional %} — Additional Chapters{% endif %}</h2>
+<h2>{{ module.title }}{% if module.is_additional and module.title != "Additional Chapters" %} — Additional Chapters{% endif %}</h2>
 {% if module.objective %}<p class="objective">{{ module.objective }}</p>{% endif %}
 
 {% for chapter in module.chapters %}

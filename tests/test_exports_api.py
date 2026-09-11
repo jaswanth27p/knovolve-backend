@@ -76,3 +76,31 @@ def test_download_redirects_only_for_successful_exports():
         resp = client.get("/courses/export-download-course/exports/1/download", headers=headers, follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"] == "https://signed.example/a.pdf"
+
+
+def test_retry_export_requeues_failed_job_and_dispatches_worker():
+    headers = _auth_headers("export-retry@example.com")
+    _make_course("export-retry-course")
+    now = datetime.now(timezone.utc)
+    with patch("app.services.exports.retry_export_job") as mock_retry, \
+        patch("app.routes.exports.run_export_task.delay") as mock_delay:
+        mock_retry.return_value.id = 55
+        mock_retry.return_value.kind = "course"
+        mock_retry.return_value.status = "pending"
+        mock_retry.return_value.error = None
+        mock_retry.return_value.created_at = now
+        mock_retry.return_value.completed_at = None
+        mock_retry.return_value.result_size = None
+        resp = client.post("/courses/export-retry-course/exports/55/retry", headers=headers)
+        assert resp.status_code == 202
+        assert resp.json()["id"] == 55
+        mock_delay.assert_called_once_with(55)
+
+
+def test_download_url_returns_presigned_json_for_browser_clients():
+    headers = _auth_headers("export-download-url@example.com")
+    _make_course("export-download-url-course")
+    with patch("app.services.exports.presigned_export_url", return_value="https://signed.example/a.pdf"):
+        resp = client.get("/courses/export-download-url-course/exports/1/download-url", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"url": "https://signed.example/a.pdf"}

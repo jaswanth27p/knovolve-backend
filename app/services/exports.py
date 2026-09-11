@@ -1,4 +1,5 @@
 """Export payloads, readiness gates, and user-scoped export-job helpers."""
+import logging
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -19,6 +20,8 @@ from app.storage import s3
 
 EXPORT_KINDS = ("course", "assignments", "full_course", "full_assignments", "custom")
 EXPORT_JOB_ERROR = "PDF export failed. Please try again."
+
+logger = logging.getLogger(__name__)
 
 
 def _now():
@@ -445,7 +448,34 @@ def run_clarify(
     db: Session, user_id: int, course: Course, message: str, history: list[ChatTurn],
 ) -> dict:
     require_export_ready(db, course, user_id, "custom")
-    return clarify_export(db, course, user_id, message, history)
+    try:
+        return clarify_export(db, course, user_id, message, history)
+    except ValueError as exc:
+        # The LLM occasionally replies with non-schema text even after a
+        # corrective retry. Surface a retryable gateway-style error instead of
+        # letting a bare 500 escape (which also drops CORS headers and shows
+        # the browser a misleading network failure).
+        logger.warning("custom clarification failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail={
+            "code": "clarify_failed",
+            "message": "The custom request assistant couldn’t respond just now. Please try again.",
+        })
+
+
+def retry_export_job(db: Session, user_id: int, course: Course, export_id: int) -> ExportJob:
+    """Re-queue a failed export, reusing its original kind and params.
+
+    Retrying at the client by re-creating a job from `kind` alone would drop
+    the custom branch's `{brief, plan}` and fail validation, so the clone lives
+    here where the stored params are available.
+    """
+    job = get_export_job(db, user_id, course, export_id)
+    if job.status != "failed":
+        raise HTTPException(status_code=409, detail={
+            "code": "not_retryable",
+            "message": "Only failed exports can be retried.",
+        })
+    return create_export_job(db, user_id, course, job.kind, job.params)
 
 
 def get_export_job(db: Session, user_id: int, course: Course, export_id: int) -> ExportJob:
@@ -478,4 +508,5 @@ def presigned_export_url(
             "code": "export_not_ready",
             "message": "This PDF is not ready for download yet.",
         })
-    return s3.presign_get_url(job.result_key, expires=expires)
+    filename = f"{course.topic_slug}-{job.kind}-{job.id}.pdf"
+    return s3.presign_get_url(job.result_key, expires=expires, download_filename=filename)

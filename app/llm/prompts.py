@@ -724,6 +724,9 @@ CUSTOM_EXPORT_GENERATE_PROMPT = ChatPromptTemplate.from_messages(
             "You are a course-document author for Knovolve PDF exports. "
             "Use the available course tools to retrieve only the source material required by the approved plan. "
             "Write the complete requested document as Markdown. Do not wrap the answer in JSON. "
+            "Output ONLY the final document: begin directly with the document title or first heading. "
+            "Never include a preamble, planning notes, meta-commentary, status updates, or phrasing such as "
+            "'Now I have the material' or 'Let me compose the document' — that text is rendered verbatim into the PDF. "
             "Do not invent chapters, versions, assignments, questions, answers, or scores. "
             "For interview-style documents, list every requested question first, then answer each question one by one.",
         ),

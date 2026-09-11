@@ -55,3 +55,13 @@ def test_presign_get_url_requests_short_lived_private_download():
     params = mock_client.generate_presigned_url.call_args.kwargs["Params"]
     assert params == {"Bucket": "knovolve", "Key": "exports/course-1/9.pdf"}
     assert mock_client.generate_presigned_url.call_args.kwargs["ExpiresIn"] == 300
+
+
+def test_presign_get_url_forces_attachment_filename_when_requested():
+    mock_client = MagicMock()
+    mock_client.generate_presigned_url.return_value = "https://signed.example/export.pdf"
+    with patch("app.storage.s3._client", return_value=mock_client):
+        s3.presign_get_url("exports/course-1/9.pdf", download_filename="course-1-course-9.pdf")
+
+    params = mock_client.generate_presigned_url.call_args.kwargs["Params"]
+    assert params["ResponseContentDisposition"] == 'attachment; filename="course-1-course-9.pdf"'

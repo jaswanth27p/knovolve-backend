@@ -119,6 +119,34 @@ def test_clarify_reasks_once_after_invalid_output_kind():
     assert model.bind_tools.return_value.invoke.call_count == 2
 
 
+def test_clarify_accepts_json_wrapped_in_prose_and_fences():
+    _course()
+    fenced = (
+        "Sure, here is the plan:\n```json\n"
+        + json.dumps({
+            "type": "plan",
+            "reply": "Ready.",
+            "questions": [],
+            "plan": {
+                "title": "Fenced plan",
+                "output_kind": "summary",
+                "length": "short",
+                "item_count": None,
+                "notes": None,
+            },
+        })
+        + "\n```\nLet me know if this works!"
+    )
+    model = _make_model(AIMessage(content=fenced))
+    with patch("app.agents.custom_export.clarify.get_chat_model", return_value=model), \
+        patch("app.agents.custom_export.clarify.build_export_tools", return_value=[]):
+        with SessionLocal() as db:
+            result = clarify_agent.clarify_export(db, _course(), 101, "Summarize this", [])
+    assert result["type"] == "plan"
+    assert result["plan"]["title"] == "Fenced plan"
+    assert model.bind_tools.return_value.invoke.call_count == 1
+
+
 def test_clarify_budget_hit_raises():
     _course()
     model = _make_model(*[AIMessage(content="", tool_calls=[{

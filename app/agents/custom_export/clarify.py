@@ -42,11 +42,39 @@ def _outline_json(db: Session, course: Course, user_id: int) -> str:
     return _existing_outline_json(db, course, user_id)
 
 
+def _message_text(resp: AIMessage) -> str:
+    if isinstance(resp.content, str):
+        return resp.content
+    parts: list[str] = []
+    for block in resp.content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _extract_json_object(text: str) -> str:
+    """Models frequently wrap JSON in prose or markdown fences. Pull out the
+    outermost object so a valid plan isn't discarded over formatting noise."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1]
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[:-3]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return stripped[start:end + 1]
+    return stripped
+
+
 def _parse_result(resp: AIMessage, model, messages: list[BaseMessage]) -> dict:
     for _ in range(MAX_PARSE_ATTEMPTS):
-        if isinstance(resp.content, str):
+        candidate = _extract_json_object(_message_text(resp))
+        if candidate:
             try:
-                return ClarifyResultDraft.model_validate_json(resp.content).model_dump()
+                return ClarifyResultDraft.model_validate_json(candidate).model_dump()
             except (ValidationError, ValueError):
                 logger.warning("custom clarification returned invalid JSON; re-asking")
         messages.append(resp)
