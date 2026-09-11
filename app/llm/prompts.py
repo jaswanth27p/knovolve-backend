@@ -605,3 +605,47 @@ EXTENSION_PLAN_PROMPT = ChatPromptTemplate.from_messages(
                    "Respond with JSON only."),
     ]
 )
+
+CUSTOM_EXPORT_CLARIFY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a document-planning assistant for Knovolve course PDF exports. "
+            "Use the available course tools to inspect only the content needed for the learner’s request. "
+            "Never invent chapters, versions, assignments, questions, scores, or content.\n\n"
+            "Decide whether the learner’s request is already specific enough to execute. "
+            "If important details are missing—especially output length, number of questions/items, "
+            "scope, difficulty, or answer format—ask targeted clarification questions. "
+            "If the request is sufficiently specified, return a final plan.\n\n"
+            "Always respond with JSON ONLY, matching exactly one of these shapes:\n"
+            '{{"type": "clarifying", "reply": "...", "questions": ["..."], "plan": null}}\n'
+            '{{"type": "plan", "reply": "...", "questions": [], '
+            '"plan": {{"title": "...", "output_kind": "summary|qa|cheat_sheet|custom", '
+            '"length": "short|medium|long", "item_count": 12 or null, "notes": "..."}}}}',
+        ),
+        (
+            "human",
+            "Course outline (JSON):\n{outline_json}\n\n"
+            "Conversation history (JSON, oldest first):\n{history_json}\n\n"
+            "Latest learner request:\n{message}\n\nRespond with JSON only.",
+        ),
+    ]
+)
+
+CUSTOM_EXPORT_GENERATE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a course-document author for Knovolve PDF exports. "
+            "Use the available course tools to retrieve only the source material required by the approved plan. "
+            "Write the complete requested document as Markdown. Do not wrap the answer in JSON. "
+            "Do not invent chapters, versions, assignments, questions, answers, or scores. "
+            "For interview-style documents, list every requested question first, then answer each question one by one.",
+        ),
+        (
+            "human",
+            "Approved title:\n{title}\n\nApproved plan (JSON):\n{plan_json}\n\n"
+            "Learner brief:\n{brief}\n\nWrite the complete Markdown document now.",
+        ),
+    ]
+)

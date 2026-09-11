@@ -12,6 +12,8 @@ LLM_NODES = {
     "grade_assignment_answers": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "chat_reply": {"provider": "opencode-go", "model": "mimo-v2.5"},
     "extension_plan": {"provider": "opencode-go", "model": "mimo-v2.5"},
+    "custom_export_clarify": {"provider": "opencode-go", "model": "mimo-v2.5"},
+    "custom_export_generate": {"provider": "opencode-go", "model": "mimo-v2.5"},
 }
 
 EMBEDDING_NODE = {"provider": "openrouter", "model": "nvidia/nemotron-3-embed-1b:free"}
