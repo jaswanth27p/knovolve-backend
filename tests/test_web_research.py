@@ -280,3 +280,20 @@ def test_run_web_research_degrades_on_model_failure(monkeypatch, caplog):
             out = run_web_research(model, [])
     assert out == ""
     assert any("web research unavailable" in r.message for r in caplog.records)
+
+
+def test_run_web_research_override_disables_when_flag_on(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "web_search_enabled", True)
+    model = MagicMock()
+    assert run_web_research(model, [], enabled=False) == ""
+
+
+def test_run_web_research_override_forwards_budgets(monkeypatch):
+    model = MagicMock()
+    with patch("app.llm.web_research.gather_research", return_value="notes") as mock_gather:
+        out = run_web_research(model, [], enabled=True, max_rounds=3, max_tool_calls=6)
+
+    assert out == "notes"
+    assert mock_gather.call_args.args[2] == 3
+    assert mock_gather.call_args.args[3] == 6

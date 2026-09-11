@@ -229,17 +229,31 @@ def gather_research(
     return _finish()
 
 
-def run_web_research(model: Runnable, messages: list[BaseMessage]) -> str:
-    """Feature-flagged entry point: research the given messages, or "" if off."""
-    if not settings.web_search_enabled:
+def run_web_research(
+    model: Runnable,
+    messages: list[BaseMessage],
+    *,
+    enabled: bool | None = None,
+    max_rounds: int | None = None,
+    max_tool_calls: int | None = None,
+) -> str:
+    """Feature-flagged entry point: research the given messages, or "" if off.
+
+    `enabled`/`max_rounds`/`max_tool_calls` default to the course-structure
+    settings; callers (chapter-content research) may override them to run
+    under an independent flag and budget.
+    """
+    if enabled is None:
+        enabled = settings.web_search_enabled
+    if not enabled:
         return ""
     try:
         bound = model.bind_tools(build_web_tools())  # pyright: ignore[reportAttributeAccessIssue]
         return gather_research(
             bound,
             messages,
-            settings.web_research_max_tool_rounds,
-            settings.web_research_max_tool_calls,
+            max_rounds if max_rounds is not None else settings.web_research_max_tool_rounds,
+            max_tool_calls if max_tool_calls is not None else settings.web_research_max_tool_calls,
             summarizer=model,
         )
     except Exception as exc:  # noqa: BLE001 - research is best-effort; degrade
