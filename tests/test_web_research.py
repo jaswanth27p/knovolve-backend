@@ -2,10 +2,16 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from app.config import Settings
 from app.llm import web_research
-from app.llm.web_research import read_webpage, web_search
+from app.llm.web_research import (
+    gather_research,
+    read_webpage,
+    run_web_research,
+    web_search,
+)
 
 
 def test_settings_defaults_present():
@@ -88,3 +94,78 @@ def test_read_webpage_retries_once(caplog):
             out = read_webpage("http://x")
     assert out == "text"
     assert any("retrying after error" in r.message for r in caplog.records)
+
+
+def _tool_call(name: str, args: dict, call_id: str = "c1") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
+    )
+
+
+def test_gather_research_no_tool_calls_returns_content(caplog):
+    model = MagicMock()
+    model.invoke.return_value = AIMessage(content="notes")
+    with caplog.at_level(logging.INFO, logger="app.llm.web_research"):
+        out = gather_research(model, [], 4)
+    assert out == "notes"
+    assert any("web research finished" in r.message for r in caplog.records)
+
+
+def test_gather_research_executes_tool_then_returns():
+    model = MagicMock()
+    model.invoke.side_effect = [
+        _tool_call("web_search", {"query": "q"}),
+        AIMessage(content="final notes"),
+    ]
+    with patch("app.llm.web_research.web_search", return_value="RESULT") as mock_search:
+        out = gather_research(model, [], 4)
+    assert out == "final notes"
+    mock_search.assert_called_once_with(query="q")
+
+
+def test_gather_research_tool_error_degrades():
+    model = MagicMock()
+    model.invoke.side_effect = [
+        _tool_call("web_search", {"query": "q"}),
+        AIMessage(content="notes after error"),
+    ]
+    with patch("app.llm.web_research.web_search", side_effect=RuntimeError("ddg down")):
+        out = gather_research(model, [], 4)
+    assert out == "notes after error"
+
+
+def test_gather_research_unknown_tool_degrades():
+    model = MagicMock()
+    model.invoke.side_effect = [
+        _tool_call("nope", {}),
+        AIMessage(content="ok"),
+    ]
+    out = gather_research(model, [], 4)
+    assert out == "ok"
+
+
+def test_gather_research_budget_exhausted_returns_empty(caplog):
+    model = MagicMock()
+    model.invoke.return_value = _tool_call("web_search", {"query": "q"})
+    with patch("app.llm.web_research.web_search", return_value="R"):
+        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
+            out = gather_research(model, [], 2)
+    assert out == ""
+    assert any("yielded no context" in r.message for r in caplog.records)
+
+
+def test_run_web_research_disabled(monkeypatch):
+    monkeypatch.setattr(web_research.settings, "web_search_enabled", False)
+    model = MagicMock()
+    assert run_web_research(model, []) == ""
+    model.bind_tools.assert_not_called()
+
+
+def test_run_web_research_enabled_binds_tools(monkeypatch):
+    monkeypatch.setattr(web_research.settings, "web_search_enabled", True)
+    model = MagicMock()
+    model.bind_tools.return_value.invoke.return_value = AIMessage(content="brief")
+    out = run_web_research(model, [])
+    assert out == "brief"
+    model.bind_tools.assert_called_once()
