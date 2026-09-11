@@ -25,6 +25,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.agents.chapter_content.nodes.generate_remediation_outline import generate_remediation_outline
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
+from app.agents.chapter_content.research import ensure_chapter_research
+from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
 from app.tasks.assignment_tasks import generate_chapter_assignment_task
@@ -94,6 +96,7 @@ def remediate_chapter(
                 content.updated_at = datetime.now(timezone.utc)
                 db.commit()
 
+        ensure_chapter_research(db, chapter, content)
         existing_orders = {
             s.order for s in db.scalars(
                 select(ChapterContentSection).where(ChapterContentSection.chapter_content_id == content.id)
@@ -104,6 +107,7 @@ def remediate_chapter(
                 continue
             result = generate_chapter_section(
                 chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"],
+                content.research_notes or FALLBACK_RESEARCH_NOTES,
             )
             section = ChapterContentSection(
                 # kind is hardcoded, not passed through from entry["kind"]:
