@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.course import Chapter, Course, Module
 from app.models.export import CourseGenerationRun
 from app.services import exports as export_service
-from app.services.assignments import _module_assignment, _module_chapters_ready
+from app.services.assignments import _module_assignment
 
 
 def _now():
@@ -58,21 +58,26 @@ def _content_has_pending_diagrams(db: Session, content_id: int) -> bool:
 def _chapter_inputs(db: Session, chapter: Chapter, user_id: int) -> list[dict]:
     units = []
     base = export_service.chapter_base_content(db, chapter, user_id)
-    if base is None:
-        if chapter.scope == "global" or chapter.user_id == user_id:
-            units.append({
-                "unit_id": f"content:{chapter.id}",
-                "kind": "content",
-                "chapter_id": chapter.id,
-            })
+    if base is None and not (chapter.scope == "global" or chapter.user_id == user_id):
+        # Not this learner's content to build (another user's bucket chapter).
         return units
-    if base.status != "ready" and base.remediation_source_attempt_id is None:
+    if base is None or base.status != "ready":
+        # Content still has to be produced/repaired. Its assignment is queued in
+        # the same run behind the content unit — units execute sequentially, so
+        # by the time the assignment unit runs the content row exists and is
+        # ready. This is what makes "Generate full course" complete in one click
+        # instead of requiring a second run for the assignments.
         units.append({
             "unit_id": f"content:{chapter.id}",
             "kind": "content",
             "chapter_id": chapter.id,
         })
-    elif base.status == "ready":
+        units.append({
+            "unit_id": f"chapter_assignment:chapter:{chapter.id}",
+            "kind": "chapter_assignment",
+            "chapter_id": chapter.id,
+        })
+    else:
         # A ready row can still have `diagram_status="pending"` sections left by
         # the streaming generator; a content unit re-runs `ensure_chapter_content`,
         # which finalizes those diagrams and no-ops the already-persisted content.
@@ -84,10 +89,9 @@ def _chapter_inputs(db: Session, chapter: Chapter, user_id: int) -> list[dict]:
             })
         if _assignment_incomplete(db, base.id, base.scope, user_id):
             units.append({
-                "unit_id": f"chapter_assignment:{base.id}",
+                "unit_id": f"chapter_assignment:chapter:{chapter.id}",
                 "kind": "chapter_assignment",
                 "chapter_id": chapter.id,
-                "content_id": base.id,
             })
     for content in export_service.chapter_remediation_versions(db, chapter, user_id):
         if content.status != "ready":
@@ -121,8 +125,11 @@ def _module_inputs(db: Session, module: Module, user_id: int) -> list[dict]:
     for chapter in chapters:
         units.extend(_chapter_inputs(db, chapter, user_id))
     # Module assignments are global-only and are generated only from complete
-    # chapter content, matching the existing module-assignment invariant.
-    if module.scope == "global" and _module_chapters_ready(module, db):
+    # chapter content, matching the existing module-assignment invariant. The
+    # unit is appended last, after every chapter unit, so the executor sees
+    # ready chapters even when this run is the one that generated them
+    # (`ensure_module_assignment` still refuses if a chapter failed).
+    if module.scope == "global" and chapters:
         assignment = _module_assignment(db, module.id)
         if assignment is None or assignment.status != "ready":
             units.append({

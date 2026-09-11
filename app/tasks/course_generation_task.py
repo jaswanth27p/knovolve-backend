@@ -14,6 +14,7 @@ from app.db import SessionLocal
 from app.models.chapter_content import ChapterContent
 from app.models.course import Chapter
 from app.models.export import CourseGenerationRun
+from app.services import exports as export_service
 from app.services import generation as generation_service
 from app.tasks.celery_app import celery_app
 
@@ -30,9 +31,18 @@ def _execute_unit(db, run, unit) -> None:
             raise ValueError(f"Chapter {unit['chapter_id']} not found")
         ensure_chapter_content(db, chapter)
     elif kind == "chapter_assignment":
-        content = db.get(ChapterContent, unit["content_id"])
+        # Content id is only known up front when the content already existed at
+        # plan time; when this run created it, resolve the (now persisted) base
+        # content from the chapter.
+        if unit.get("content_id") is not None:
+            content = db.get(ChapterContent, unit["content_id"])
+        else:
+            chapter = db.get(Chapter, unit["chapter_id"])
+            if chapter is None:
+                raise ValueError(f"Chapter {unit['chapter_id']} not found")
+            content = export_service.chapter_base_content(db, chapter, run.user_id)
         if content is None:
-            raise ValueError(f"ChapterContent {unit['content_id']} not found")
+            raise ValueError(f"Chapter {unit['chapter_id']} has no base content for its assignment")
         ensure_chapter_assignment(db, content)
     elif kind == "remediation_content":
         content = db.get(ChapterContent, unit["content_id"])

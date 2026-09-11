@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 from app.auth.dependencies import get_current_user
 from app.db import get_session
@@ -35,13 +35,17 @@ def queue_generation(slug: str, response: Response, db: Session = Depends(get_se
     return _serialize_run(run, action)
 
 
-@router.get("/generation", response_model=GenerationRunResponse)
+@router.get("/generation", response_model=GenerationRunResponse | None)
 def get_generation(slug: str, db: Session = Depends(get_session),
                    user: User = Depends(get_current_user)):
+    # 200 + null rather than 404: "no run yet" is the normal state of a
+    # freshly-created course, and the course page probes this on every load.
+    # A 404 there is expected but shows up as a failed request in the browser
+    # console and trips client error handling for a non-error.
     course = courses.get_course_by_slug(db, slug)
     run = generation_service.get_latest_run(db, user.id, course)
     if run is None:
-        raise HTTPException(status_code=404, detail="generation run not found")
+        return None
     return _serialize_run(run)
 
 

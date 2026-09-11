@@ -89,6 +89,14 @@ def test_readiness_returns_service_status():
     assert resp.json() == readiness
 
 
+def test_generation_without_run_returns_null_not_404():
+    headers = _auth_headers("generation-null@example.com")
+    _make_course("generation-null-course")
+    resp = client.get("/courses/generation-null-course/generation", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
 def _seed_pending_run(slug="generation-task-course"):
     with SessionLocal() as db:
         db.add(User(id=91, email="generation-task@example.com", password_hash="x"))
@@ -104,28 +112,38 @@ def _seed_pending_run(slug="generation-task-course"):
 
 def test_worker_executes_planned_units_and_completes():
     run_id = _seed_pending_run()
-    with patch("app.tasks.course_generation_task.ensure_chapter_content") as mock_content:
+    with patch("app.tasks.course_generation_task.ensure_chapter_content") as mock_content, \
+        patch("app.tasks.course_generation_task.ensure_chapter_assignment") as mock_assign, \
+        patch("app.tasks.course_generation_task.ensure_module_assignment") as mock_module, \
+        patch("app.tasks.course_generation_task.export_service.chapter_base_content",
+              return_value=SimpleNamespace()):
         run_course_generation_task(run_id)  # pyright: ignore[reportCallIssue]
 
     assert mock_content.call_count == 2
+    assert mock_assign.call_count == 2
+    assert mock_module.call_count == 1
     with SessionLocal() as db:
         run = db.get(CourseGenerationRun, run_id)
         assert run is not None
         assert run.status == "succeeded"
-        assert run.completed_units == 2
-        assert [u["status"] for u in run.unit_states] == ["done", "done"]
+        assert run.completed_units == 5
+        assert [u["status"] for u in run.unit_states] == ["done"] * 5
 
 
 def test_unit_failure_marks_run_failed_without_losing_progress():
     run_id = _seed_pending_run("generation-failure-course")
     with patch("app.tasks.course_generation_task.ensure_chapter_content",
-              side_effect=[ValueError("LLM failed"), None]):
+              side_effect=[ValueError("LLM failed"), None]), \
+        patch("app.tasks.course_generation_task.ensure_chapter_assignment"), \
+        patch("app.tasks.course_generation_task.ensure_module_assignment"), \
+        patch("app.tasks.course_generation_task.export_service.chapter_base_content",
+              return_value=SimpleNamespace()):
         run_course_generation_task(run_id)  # pyright: ignore[reportCallIssue]
 
     with SessionLocal() as db:
         run = db.get(CourseGenerationRun, run_id)
         assert run is not None
         assert run.status == "failed"
-        assert run.completed_units == 2
-        assert [u["status"] for u in run.unit_states] == ["failed", "done"]
+        assert run.completed_units == 5
+        assert [u["status"] for u in run.unit_states] == ["failed", "done", "done", "done", "done"]
         assert run.error == "Course generation failed. Please try again."

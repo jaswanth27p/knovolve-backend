@@ -83,17 +83,21 @@ def test_plan_includes_user_remediation_for_global_chapter():
         assert remediation_unit["chapter_id"] == chapter_id
 
 
-def test_plan_includes_ready_assignment_work_and_omits_unready_module_assignment():
+def test_plan_queues_content_assignments_and_module_assignment_in_one_run():
     course_id = _seed_planning_course()
     with SessionLocal() as db:
         from app.models.course import Course as CourseModel
         course = db.get(CourseModel, course_id)
         assert course is not None
-        ready_content = db.query(ChapterContent).filter_by(status="ready").one()
+        first = db.query(Chapter).filter_by(title="First").one()
+        second = db.query(Chapter).filter_by(title="Second").one()
+        module = db.query(Module).filter_by(title="M").one()
         units = svc.plan_units(db, course, 81)
         assert [u["unit_id"] for u in units] == [
-            f"chapter_assignment:{ready_content.id}",
-            "content:2",
+            f"chapter_assignment:chapter:{first.id}",
+            f"content:{second.id}",
+            f"chapter_assignment:chapter:{second.id}",
+            f"module_assignment:{module.id}",
         ]
         assert units[0]["kind"] == "chapter_assignment"
         assert units[1]["kind"] == "content"
