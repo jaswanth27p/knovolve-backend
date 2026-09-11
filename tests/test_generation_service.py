@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
-from app.db import SessionLocal
+from sqlalchemy import event
+from app.db import SessionLocal, engine
 from app.models.assignment import Assignment
 from app.models.attempt import AssignmentAttempt
 from app.models.chapter_content import ChapterContent
 from app.models.course import Course, Module, Chapter
+from app.models.export import CourseGenerationRun
 from app.models.user import User
 from app.services import generation as svc
 
@@ -123,3 +125,73 @@ def test_empty_plan_records_completed_check_run():
         assert action == "already_complete"
         assert run.status == "succeeded"
         assert run.total_units == 0
+
+
+def test_empty_plan_reuses_completed_check_run_idempotently():
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc)
+        db.add(User(id=84, email="generation-complete-idempotent@example.com", password_hash="x"))
+        course = Course(topic_slug="generation-complete-idempotent", topic_raw="Complete",
+                        topic_embedding=[0.0] * 2048, created_at=now)
+        db.add(course)
+        db.commit()
+        db.refresh(course)
+        first, first_action = svc.queue_generation_run(db, 84, course)
+        second, second_action = svc.queue_generation_run(db, 84, course)
+        assert first_action == "already_complete"
+        assert second_action == "already_complete"
+        assert first.id == second.id
+        assert db.query(CourseGenerationRun).filter_by(
+            course_id=course.id, user_id=84
+        ).count() == 1
+
+
+def test_get_latest_run_prefers_active_higher_id_on_created_at_tie():
+    course_id = _seed_planning_course("generation-latest-tie")
+    with SessionLocal() as db:
+        from app.models.course import Course as CourseModel
+        course = db.get(CourseModel, course_id)
+        assert course is not None
+        created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        older = CourseGenerationRun(
+            course_id=course.id, user_id=81, status="succeeded", total_units=0, completed_units=0,
+            unit_states=[], created_at=created, updated_at=created, completed_at=created,
+        )
+        db.add(older)
+        db.commit()
+        active = CourseGenerationRun(
+            course_id=course.id, user_id=81, status="running", total_units=1, completed_units=0,
+            unit_states=[], created_at=created, updated_at=created,
+        )
+        db.add(active)
+        db.commit()
+        latest = svc.get_latest_run(db, 81, course)
+        assert latest is not None
+        assert latest.id == active.id
+        assert latest.id > older.id
+
+
+def test_queue_generation_run_takes_advisory_lock_before_insert():
+    course_id = _seed_planning_course("generation-advisory-lock")
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        with SessionLocal() as db:
+            from app.models.course import Course as CourseModel
+            course = db.get(CourseModel, course_id)
+            assert course is not None
+            svc.queue_generation_run(db, 81, course)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    lock_indexes = [i for i, s in enumerate(statements) if "pg_advisory_xact_lock" in s]
+    assert lock_indexes, f"advisory lock was not issued: {statements}"
+    insert_indexes = [
+        i for i, s in enumerate(statements) if "INSERT INTO course_generation_runs" in s
+    ]
+    assert insert_indexes, f"run insert was not issued: {statements}"
+    assert lock_indexes[0] < insert_indexes[0]

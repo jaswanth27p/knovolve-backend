@@ -175,7 +175,9 @@ def test_ensure_chapter_assignment_requires_ready_and_calls_generator():
         db.add(content)
         db.commit()
 
-        with patch("app.agents.generation.ensure.generate_chapter_assignment") as mock_gen:
+        with patch("app.agents.generation.ensure.generate_chapter_assignment") as mock_gen, \
+            patch("app.agents.generation.ensure._chapter_assignment",
+                  return_value=MagicMock(status="ready")):
             ensure_module.ensure_chapter_assignment(db, content)
         mock_gen.assert_called_once_with(content.id, db)
 
@@ -183,6 +185,88 @@ def test_ensure_chapter_assignment_requires_ready_and_calls_generator():
         db.commit()
         with pytest.raises(ValueError):
             ensure_module.ensure_chapter_assignment(db, content)
+
+
+def _seed_ready_chapter_content(user_id, slug):
+    chapter_id, _ = _seed_chapter(user_id=user_id, slug=slug)
+    with SessionLocal() as db:
+        now = _now()
+        content = ChapterContent(chapter_id=chapter_id, version=1, scope="global", status="ready",
+                                 outline=[], created_at=now, updated_at=now)
+        db.add(content)
+        db.commit()
+        return content.id
+
+
+def test_ensure_chapter_assignment_raises_when_generated_assignment_failed():
+    content_id = _seed_ready_chapter_content(77, "generation-assignment-failed")
+    with SessionLocal() as db:
+        now = _now()
+        db.add(Assignment(level="chapter", scope="global", chapter_content_id=content_id,
+                          status="failed", created_at=now, updated_at=now))
+        db.commit()
+        content = db.get(ChapterContent, content_id)
+        assert content is not None
+        with patch("app.agents.generation.ensure.generate_chapter_assignment"), \
+            pytest.raises(ValueError, match="Chapter assignment generation failed"):
+            ensure_module.ensure_chapter_assignment(db, content)
+
+
+def test_ensure_chapter_assignment_raises_when_no_assignment_persisted():
+    content_id = _seed_ready_chapter_content(78, "generation-assignment-missing")
+    with SessionLocal() as db:
+        content = db.get(ChapterContent, content_id)
+        assert content is not None
+        with patch("app.agents.generation.ensure.generate_chapter_assignment"), \
+            pytest.raises(ValueError, match="Chapter assignment generation failed"):
+            ensure_module.ensure_chapter_assignment(db, content)
+
+
+@pytest.mark.parametrize("status", ["ready", "generating"])
+def test_ensure_chapter_assignment_allows_non_failed_status(status):
+    content_id = _seed_ready_chapter_content(79, f"generation-assignment-{status}")
+    with SessionLocal() as db:
+        now = _now()
+        db.add(Assignment(level="chapter", scope="global", chapter_content_id=content_id,
+                          status=status, created_at=now, updated_at=now))
+        db.commit()
+        content = db.get(ChapterContent, content_id)
+        assert content is not None
+        with patch("app.agents.generation.ensure.generate_chapter_assignment"):
+            ensure_module.ensure_chapter_assignment(db, content)
+
+
+def test_ensure_module_assignment_raises_when_generated_assignment_failed():
+    _seed_chapter(user_id=80, slug="generation-module-assignment-failed")
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(level="module").one()
+        assignment.status = "failed"
+        db.commit()
+        module_id = assignment.module_id
+        assert module_id is not None
+        with patch("app.agents.generation.ensure.generate_module_assignment"), \
+            pytest.raises(ValueError, match="Module assignment generation failed"):
+            ensure_module.ensure_module_assignment(db, module_id)
+
+
+def test_ensure_module_assignment_raises_when_no_assignment_persisted():
+    with SessionLocal() as db:
+        with patch("app.agents.generation.ensure.generate_module_assignment"), \
+            pytest.raises(ValueError, match="Module assignment generation failed"):
+            ensure_module.ensure_module_assignment(db, 987654)
+
+
+@pytest.mark.parametrize("status", ["ready", "generating"])
+def test_ensure_module_assignment_allows_non_failed_status(status):
+    _seed_chapter(user_id=81, slug=f"generation-module-assignment-{status}")
+    with SessionLocal() as db:
+        assignment = db.query(Assignment).filter_by(level="module").one()
+        assignment.status = status
+        db.commit()
+        module_id = assignment.module_id
+        assert module_id is not None
+        with patch("app.agents.generation.ensure.generate_module_assignment"):
+            ensure_module.ensure_module_assignment(db, module_id)
 
 
 def test_ensure_remediation_content_guards_and_dispatches():
@@ -213,6 +297,8 @@ def test_ensure_remediation_content_guards_and_dispatches():
 
 def test_ensure_module_assignment_calls_generator():
     with SessionLocal() as db:
-        with patch("app.agents.generation.ensure.generate_module_assignment") as mock_gen:
+        with patch("app.agents.generation.ensure.generate_module_assignment") as mock_gen, \
+            patch("app.agents.generation.ensure._module_assignment",
+                  return_value=MagicMock(status="ready")):
             ensure_module.ensure_module_assignment(db, 42)
         mock_gen.assert_called_once_with(42, db)

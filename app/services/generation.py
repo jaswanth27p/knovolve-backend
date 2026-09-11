@@ -1,7 +1,7 @@
 """Full-course readiness computation and race-safe completion-run planning."""
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,7 +26,7 @@ def get_latest_run(db: Session, user_id: int, course: Course) -> CourseGeneratio
             CourseGenerationRun.course_id == course.id,
             CourseGenerationRun.user_id == user_id,
         )
-        .order_by(CourseGenerationRun.created_at.desc())
+        .order_by(CourseGenerationRun.created_at.desc(), CourseGenerationRun.id.desc())
     )
 
 
@@ -145,6 +145,13 @@ def plan_units(db: Session, course: Course, user_id: int) -> list[dict]:
 
 
 def queue_generation_run(db: Session, user_id: int, course: Course) -> tuple[CourseGenerationRun, str]:
+    # Transaction-scoped advisory lock keyed on (course, user): serializes
+    # concurrent callers so the active-run check, the plan, and the insert all
+    # happen inside one critical section. Released on the first commit below.
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:course_id, :user_id)"),
+        {"course_id": course.id, "user_id": user_id},
+    )
     active = db.scalar(
         select(CourseGenerationRun).where(
             CourseGenerationRun.course_id == course.id,
@@ -157,6 +164,9 @@ def queue_generation_run(db: Session, user_id: int, course: Course) -> tuple[Cou
     units = plan_units(db, course, user_id)
     now = _now()
     if not units:
+        latest = get_latest_run(db, user_id, course)
+        if latest is not None and latest.status == "succeeded" and latest.total_units == 0:
+            return latest, "already_complete"
         run = CourseGenerationRun(
             course_id=course.id,
             user_id=user_id,

@@ -16,6 +16,7 @@ from app.agents.chapter_content.nodes.generate_section_outline import generate_s
 from app.agents.chapter_content.remediate import remediate_chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
+from app.services.assignments import _chapter_assignment, _module_assignment
 from app.tasks.render_diagram_task import render_and_upload_diagram
 
 
@@ -126,10 +127,20 @@ def ensure_chapter_content(db: Session, chapter: Chapter) -> None:
         _finalize_pending_diagrams(db, content)
 
 
+def _raise_if_generation_failed(assignment, label: str) -> None:
+    # A generate_* call that catches its own error marks the row "failed" and
+    # returns, so re-read the persisted row and surface the failure. A healthy
+    # in-flight "generating" row is left alone (another worker owns it; the
+    # next plan re-includes it).
+    if assignment is None or assignment.status == "failed":
+        raise ValueError(f"{label} generation failed")
+
+
 def ensure_chapter_assignment(db: Session, content: ChapterContent) -> None:
     if content.status != "ready":
         raise ValueError("Chapter assignment requires ready content")
     generate_chapter_assignment(content.id, db)
+    _raise_if_generation_failed(_chapter_assignment(db, content), "Chapter assignment")
 
 
 def ensure_remediation_content(db: Session, chapter_id: int, user_id: int, content: ChapterContent) -> None:
@@ -153,3 +164,4 @@ def ensure_remediation_content(db: Session, chapter_id: int, user_id: int, conte
 
 def ensure_module_assignment(db: Session, module_id: int) -> None:
     generate_module_assignment(module_id, db)
+    _raise_if_generation_failed(_module_assignment(db, module_id), "Module assignment")
