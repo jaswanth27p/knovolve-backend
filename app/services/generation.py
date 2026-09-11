@@ -160,12 +160,18 @@ def queue_generation_run(db: Session, user_id: int, course: Course) -> tuple[Cou
         )
     )
     if active is not None:
+        # Roll back to release the transaction-scoped advisory lock; nothing has
+        # been written yet, so the read-only run object stays usable.
+        db.rollback()
         return active, "already_running"
     units = plan_units(db, course, user_id)
     now = _now()
     if not units:
         latest = get_latest_run(db, user_id, course)
         if latest is not None and latest.status == "succeeded" and latest.total_units == 0:
+            # Roll back to release the transaction-scoped advisory lock; nothing
+            # has been written yet, so the read-only run object stays usable.
+            db.rollback()
             return latest, "already_complete"
         run = CourseGenerationRun(
             course_id=course.id,
