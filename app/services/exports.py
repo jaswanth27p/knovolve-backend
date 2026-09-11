@@ -2,11 +2,11 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.documents.render import diagram_data_uri, markdown_to_html
-from app.models.assignment import Assignment, AssignmentQuestion
+from app.models.assignment import AssignmentQuestion
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter, Course, Module
 from app.models.export import ExportJob
@@ -93,7 +93,7 @@ def visible_versions(db: Session, chapter: Chapter, user_id: int, include_remedi
 def _version_label(content: ChapterContent) -> str:
     if content.remediation_source_attempt_id is None:
         return f"Version {content.version}"
-    return f"Personalized version {content.version}"
+    return f"Version {content.version}"
 
 
 def _missing_global_content(db: Session, course: Course) -> list[int]:
@@ -267,7 +267,7 @@ def _content_assignment_with_key(db: Session, content: ChapterContent, label: st
     }
 
 
-def _module_assignment_with_key(db: Session, module: Module) -> dict | None:
+def _module_assignment_with_key(db: Session, module: Module) -> dict:
     assignment = _module_assignment(db, module.id)
     if assignment is None or assignment.status != "ready":
         raise HTTPException(status_code=409, detail={

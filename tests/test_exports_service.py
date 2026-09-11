@@ -25,6 +25,24 @@ def test_scope_helpers_separate_global_and_user_versions():
         assert [c.version for c in svc.visible_versions(db, extra, 51, include_remediation=True)] == [1]
 
 
+def test_version_label_omits_personalized_prefix_for_remediation():
+    course_id = _seed_gate_course("export-version-label")
+    with SessionLocal() as db:
+        course = db.get(Course, course_id)
+        assert course is not None
+        first = db.query(Chapter).filter_by(title="First").one()
+        base = svc.chapter_base_content(db, first, 51)
+        assert base is not None
+        remediation = db.scalars(
+            select(ChapterContent).where(
+                ChapterContent.chapter_id == first.id,
+                ChapterContent.remediation_source_attempt_id.isnot(None),
+            )
+        ).one()
+        assert svc._version_label(base) == f"Version {base.version}"
+        assert svc._version_label(remediation) == f"Version {remediation.version}"
+
+
 def _detail_code(exc: pytest.ExceptionInfo[HTTPException]) -> str:
     return cast(dict, exc.value.detail)["code"]
 
