@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import trafilatura
 from ddgs import DDGS
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 
@@ -145,17 +145,27 @@ def build_web_tools() -> list[BaseTool]:
     return [_web_search, _read_webpage]
 
 
+def _content_text(resp: object) -> str:
+    if isinstance(resp, AIMessage) and isinstance(resp.content, str):
+        return resp.content
+    return ""
+
+
 def gather_research(
     model_with_tools: Runnable,
     messages: list[BaseMessage],
     max_rounds: int,
     max_tool_calls: int | None = None,
+    summarizer: Runnable | None = None,
 ) -> str:
     """Run a bounded tool loop; return the model's final research brief.
 
     A tool failure after its internal retry becomes an error ``ToolMessage``
-    and the loop continues (graceful degrade). Returns ``""`` when the budget
-    is exhausted or the model never produces text.
+    and the loop continues (graceful degrade). When the round budget or the
+    tool-call cap is exhausted and at least one tool result was gathered, a
+    final unbound-model summarization pass (`summarizer`) turns the tool
+    results into the brief. Returns ``""`` when nothing was gathered or no
+    text could be produced.
     """
     impls: dict[str, Callable[..., str]] = {
         "web_search": web_search,
@@ -163,18 +173,39 @@ def gather_research(
     }
     rounds = 0
     tool_calls = 0
+
+    def _finish() -> str:
+        if summarizer is not None and tool_calls > 0:
+            try:
+                messages.append(HumanMessage(content=(
+                    "Stop researching now and output your concise research notes "
+                    "from the tool results above, with source URLs. Do not call any tools."
+                )))
+                resp = call_with_retry(summarizer.invoke, messages)
+                content = _content_text(resp)
+                if content:
+                    logger.info(
+                        "web research finished (summary) rounds=%d tool_calls=%d notes_chars=%d",
+                        rounds, tool_calls, len(content),
+                    )
+                    return content
+            except Exception as exc:  # noqa: BLE001 - best-effort summary
+                logger.warning("web research summary failed: %s", exc)
+        logger.warning("web research yielded no context")
+        return ""
+
     for _ in range(max_rounds):
         resp = call_with_retry(model_with_tools.invoke, messages)
         if not isinstance(resp, AIMessage):
             break
         if not resp.tool_calls:
-            content = resp.content if isinstance(resp.content, str) else ""
+            content = _content_text(resp)
             logger.info(
                 "web research finished rounds=%d tool_calls=%d notes_chars=%d",
                 rounds, tool_calls, len(content),
             )
             if not content:
-                logger.warning("web research yielded no context")
+                return _finish()
             return content
 
         messages.append(resp)
@@ -182,7 +213,7 @@ def gather_research(
         for call in resp.tool_calls:
             if max_tool_calls is not None and tool_calls >= max_tool_calls:
                 logger.warning("web research tool budget exhausted")
-                return ""
+                return _finish()
             tool_calls += 1
             name = call["name"]
             logger.info("research round=%d tool_calls=%d", rounds, tool_calls)
@@ -195,8 +226,7 @@ def gather_research(
                 result = "Error: something went wrong calling this tool."
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 
-    logger.warning("web research yielded no context")
-    return ""
+    return _finish()
 
 
 def run_web_research(model: Runnable, messages: list[BaseMessage]) -> str:
@@ -210,6 +240,7 @@ def run_web_research(model: Runnable, messages: list[BaseMessage]) -> str:
             messages,
             settings.web_research_max_tool_rounds,
             settings.web_research_max_tool_calls,
+            summarizer=model,
         )
     except Exception as exc:  # noqa: BLE001 - research is best-effort; degrade
         logger.warning("web research unavailable; continuing without it: %s", exc)

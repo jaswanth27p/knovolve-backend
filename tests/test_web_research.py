@@ -213,6 +213,44 @@ def test_gather_research_tool_budget_caps_executions(caplog):
     assert any("tool budget exhausted" in r.message for r in caplog.records)
 
 
+def test_gather_research_summarizes_when_round_budget_exhausted():
+    model = MagicMock()
+    model.invoke.return_value = _tool_call("web_search", {"query": "q"})
+    summarizer = MagicMock()
+    summarizer.invoke.return_value = AIMessage(content="SUMMARY NOTES")
+    with patch("app.llm.web_research.web_search", return_value="R"):
+        out = gather_research(model, [], 2, summarizer=summarizer)
+    assert out == "SUMMARY NOTES"
+    summarizer.invoke.assert_called_once()
+
+
+def test_gather_research_summarizes_when_tool_cap_trips():
+    model = MagicMock()
+    model.invoke.return_value = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "web_search", "args": {"query": "a"}, "id": "c1", "type": "tool_call"},
+            {"name": "web_search", "args": {"query": "b"}, "id": "c2", "type": "tool_call"},
+        ],
+    )
+    summarizer = MagicMock()
+    summarizer.invoke.return_value = AIMessage(content="SUMMARY NOTES")
+    with patch("app.llm.web_research.web_search", return_value="R"):
+        out = gather_research(
+            model, [], 3, max_tool_calls=1, summarizer=summarizer
+        )
+    assert out == "SUMMARY NOTES"
+
+
+def test_gather_research_no_tools_no_summary_when_no_results():
+    model = MagicMock()
+    model.invoke.return_value = AIMessage(content="")
+    summarizer = MagicMock()
+    out = gather_research(model, [], 2, summarizer=summarizer)
+    assert out == ""
+    summarizer.invoke.assert_not_called()
+
+
 def test_run_web_research_disabled(monkeypatch):
     monkeypatch.setattr(web_research.settings, "web_search_enabled", False)
     model = MagicMock()
