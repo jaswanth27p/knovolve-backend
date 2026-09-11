@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>{{ title }} — {{ subtitle }}</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; @bottom-center { content: counter(page); } }
+  body { font-family: sans-serif; color: #111; line-height: 1.55; }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  h2 { font-size: 19px; margin: 22px 0 6px; page-break-after: avoid; }
+  h3 { font-size: 16px; margin: 16px 0 4px; page-break-after: avoid; }
+  h4 { font-size: 14px; margin: 12px 0 4px; page-break-after: avoid; }
+  .subtitle { color: #444; margin-bottom: 20px; }
+  .objective { color: #333; }
+  .version { border: 1px solid #ddd; padding: 10px 12px; margin: 10px 0; page-break-inside: avoid; }
+  .example, .question { border-top: 1px solid #eee; padding: 8px 0; }
+  img { max-width: 100%; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>{{ title }}</h1>
+<p class="subtitle">{{ subtitle }} · Generated {{ generated_at }}</p>
+
+{% if document_kind == "custom" %}
+{{ body_html | safe }}
+{% else %}
+<h2>Contents</h2>
+<ol>
+{% for module in modules %}
+  <li>{{ module.title }}
+    {% if module.chapters %}
+    <ol>
+      {% for chapter in module.chapters %}
+      <li>{{ chapter.title }}</li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </li>
+{% endfor %}
+</ol>
+
+{% for module in modules %}
+<h2>{{ module.title }}{% if module.is_additional %} — Additional Chapters{% endif %}</h2>
+{% if module.objective %}<p class="objective">{{ module.objective }}</p>{% endif %}
+
+{% for chapter in module.chapters %}
+<h3>{{ chapter.title }}</h3>
+{% if chapter.objective %}<p class="objective">{{ chapter.objective }}</p>{% endif %}
+
+{% if document_kind == "course" %}
+{% for version in chapter.versions %}
+<div class="version">
+<h4>{{ version.label }}{% if version.is_remediation %} — Personalized version{% endif %}</h4>
+{% for section in version.sections %}
+<h4>{{ section.heading }}</h4>
+{{ section.body_html | safe }}
+{% for example in section.examples %}
+<div class="example">
+<p><strong>Example:</strong> {{ example.prompt }}</p>
+<p>{{ example.walkthrough }}</p>
+</div>
+{% endfor %}
+{% if section.diagram_data_uri %}
+<img src="{{ section.diagram_data_uri }}" alt="Diagram for {{ section.heading }}" />
+{% endif %}
+{% endfor %}
+</div>
+{% endfor %}
+{% endif %}
+
+{% if document_kind == "assignments" %}
+{% for assignment in chapter.assignments %}
+<div class="version">
+<h4>{{ assignment.label }}</h4>
+{% for question in assignment.questions %}
+<div class="question">
+<p><strong>Q{{ question.order }} [{{ question.type }} · {{ question.difficulty }}]:</strong> {{ question.text }}</p>
+{% if question.options %}
+<ul>
+{% for option in question.options %}
+<li>{{ option }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+<p><strong>Answer key:</strong> {{ question.correct_answer }}</p>
+<p>{{ question.explanation }}</p>
+</div>
+{% endfor %}
+</div>
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+{% if document_kind == "assignments" and module.module_assignment %}
+<h3>{{ module.module_assignment.label }}</h3>
+{% for question in module.module_assignment.questions %}
+<div class="question">
+<p><strong>Q{{ question.order }} [{{ question.type }} · {{ question.difficulty }}]:</strong> {{ question.text }}</p>
+{% if question.options %}
+<ul>
+{% for option in question.options %}
+<li>{{ option }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+<p><strong>Answer key:</strong> {{ question.correct_answer }}</p>
+<p>{{ question.explanation }}</p>
+</div>
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+</body>
+</html>
