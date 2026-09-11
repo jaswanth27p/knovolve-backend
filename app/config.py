@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     web_search_max_results: int = 5
     web_page_max_chars: int = 8000
     web_research_max_tool_rounds: int = 4
+    web_research_max_tool_calls: int = 8
     web_request_timeout_seconds: float = 15.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.

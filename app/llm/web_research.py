@@ -9,8 +9,11 @@ Every search/fetch retries exactly once, then the caller degrades gracefully.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from typing import Callable, TypeVar
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import trafilatura
@@ -31,7 +34,36 @@ FALLBACK_RESEARCH_NOTES = "(no web research available)"
 _NO_RESULTS = "No results."
 _NO_CONTENT = "Could not extract content."
 
+_MAX_REDIRECTS = 5
+
 T = TypeVar("T")
+
+
+def _assert_public_url(url: str) -> None:
+    """Reject non-http(s) URLs and hosts resolving to private/loopback/
+    link-local/reserved/multicast/unspecified addresses (SSRF guard)."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"blocked URL scheme: {parts.scheme!r}")
+    host = parts.hostname
+    if not host:
+        raise ValueError("URL has no host")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        addrs = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"cannot resolve host {host!r}") from exc
+    for _family, _type, _proto, _canon, sockaddr in addrs:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"blocked non-public address for {host!r}: {ip}")
 
 
 def _retry_once(fn: Callable[[], T], *, what: str) -> T:
@@ -65,14 +97,24 @@ def web_search(query: str) -> str:
 def read_webpage(url: str) -> str:
     """Fetch ``url`` and return its extracted main text, truncated."""
     def _run() -> str:
-        resp = httpx.get(
-            url,
-            timeout=settings.web_request_timeout_seconds,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        extracted = trafilatura.extract(resp.text) or ""
-        return extracted[: settings.web_page_max_chars]
+        current = url
+        for _ in range(_MAX_REDIRECTS + 1):
+            _assert_public_url(current)
+            resp = httpx.get(
+                current,
+                timeout=settings.web_request_timeout_seconds,
+                follow_redirects=False,
+            )
+            if resp.is_redirect:
+                location = resp.headers.get("location")
+                if not location:
+                    break
+                current = urljoin(current, location)
+                continue
+            resp.raise_for_status()
+            extracted = trafilatura.extract(resp.text) or ""
+            return extracted[: settings.web_page_max_chars]
+        raise ValueError("too many redirects")
 
     try:
         text = _retry_once(_run, what="read_webpage")
@@ -104,7 +146,10 @@ def build_web_tools() -> list[BaseTool]:
 
 
 def gather_research(
-    model_with_tools: Runnable, messages: list[BaseMessage], max_rounds: int
+    model_with_tools: Runnable,
+    messages: list[BaseMessage],
+    max_rounds: int,
+    max_tool_calls: int | None = None,
 ) -> str:
     """Run a bounded tool loop; return the model's final research brief.
 
@@ -135,6 +180,9 @@ def gather_research(
         messages.append(resp)
         rounds += 1
         for call in resp.tool_calls:
+            if max_tool_calls is not None and tool_calls >= max_tool_calls:
+                logger.warning("web research tool budget exhausted")
+                return ""
             tool_calls += 1
             name = call["name"]
             logger.info("research round=%d tool_calls=%d", rounds, tool_calls)
@@ -155,5 +203,14 @@ def run_web_research(model: Runnable, messages: list[BaseMessage]) -> str:
     """Feature-flagged entry point: research the given messages, or "" if off."""
     if not settings.web_search_enabled:
         return ""
-    bound = model.bind_tools(build_web_tools())  # pyright: ignore[reportAttributeAccessIssue]
-    return gather_research(bound, messages, settings.web_research_max_tool_rounds)
+    try:
+        bound = model.bind_tools(build_web_tools())  # pyright: ignore[reportAttributeAccessIssue]
+        return gather_research(
+            bound,
+            messages,
+            settings.web_research_max_tool_rounds,
+            settings.web_research_max_tool_calls,
+        )
+    except Exception as exc:  # noqa: BLE001 - research is best-effort; degrade
+        logger.warning("web research unavailable; continuing without it: %s", exc)
+        return ""

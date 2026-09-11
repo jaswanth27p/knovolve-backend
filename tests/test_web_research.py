@@ -20,12 +20,25 @@ def test_settings_defaults_present():
     assert s.web_search_max_results == 5
     assert s.web_page_max_chars == 8000
     assert s.web_research_max_tool_rounds == 4
+    assert s.web_research_max_tool_calls == 8
     assert s.web_request_timeout_seconds == 15.0
 
 
 def _resp(text: str) -> MagicMock:
     m = MagicMock()
     m.text = text
+    m.status_code = 200
+    m.is_redirect = False
+    m.headers = {}
+    m.raise_for_status.return_value = None
+    return m
+
+
+def _redirect(location: str) -> MagicMock:
+    m = MagicMock()
+    m.status_code = 302
+    m.is_redirect = True
+    m.headers = {"location": location}
     m.raise_for_status.return_value = None
     return m
 
@@ -73,7 +86,7 @@ def test_read_webpage_extracts_and_truncates(monkeypatch):
          patch("app.llm.web_research.trafilatura") as mock_traf:
         mock_httpx.get.return_value = _resp("<html/>")
         mock_traf.extract.return_value = "abcdefghij"
-        out = read_webpage("http://x")
+        out = read_webpage("http://93.184.216.34/")
     assert out == "abcde"
 
 
@@ -82,7 +95,7 @@ def test_read_webpage_no_content():
          patch("app.llm.web_research.trafilatura") as mock_traf:
         mock_httpx.get.return_value = _resp("<html/>")
         mock_traf.extract.return_value = None
-        assert read_webpage("http://x") == "Could not extract content."
+        assert read_webpage("http://93.184.216.34/") == "Could not extract content."
 
 
 def test_read_webpage_retries_once(caplog):
@@ -91,9 +104,34 @@ def test_read_webpage_retries_once(caplog):
         mock_httpx.get.side_effect = [RuntimeError("boom"), _resp("<html/>")]
         mock_traf.extract.return_value = "text"
         with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
-            out = read_webpage("http://x")
+            out = read_webpage("http://93.184.216.34/")
     assert out == "text"
     assert any("retrying after error" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/",
+        "http://169.254.169.254/",
+        "http://10.0.0.5/",
+        "file:///etc/passwd",
+    ],
+)
+def test_read_webpage_rejects_non_public_urls(url):
+    with patch("app.llm.web_research.httpx") as mock_httpx:
+        with pytest.raises(ValueError):
+            read_webpage(url)
+    mock_httpx.get.assert_not_called()
+
+
+def test_read_webpage_rejects_private_redirect():
+    with patch("app.llm.web_research.httpx") as mock_httpx:
+        mock_httpx.get.return_value = _redirect("http://127.0.0.1/secret")
+        with pytest.raises(ValueError):
+            read_webpage("http://93.184.216.34/")
+    fetched = [c.args[0] for c in mock_httpx.get.call_args_list]
+    assert all("127.0.0.1" not in u for u in fetched)
 
 
 def _tool_call(name: str, args: dict, call_id: str = "c1") -> AIMessage:
@@ -155,6 +193,26 @@ def test_gather_research_budget_exhausted_returns_empty(caplog):
     assert any("yielded no context" in r.message for r in caplog.records)
 
 
+def test_gather_research_tool_budget_caps_executions(caplog):
+    model = MagicMock()
+    model.invoke.side_effect = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "web_search", "args": {"query": "a"}, "id": "c1", "type": "tool_call"},
+                {"name": "web_search", "args": {"query": "b"}, "id": "c2", "type": "tool_call"},
+            ],
+        ),
+        AIMessage(content="final notes"),
+    ]
+    with patch("app.llm.web_research.web_search", return_value="R") as mock_search:
+        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
+            out = gather_research(model, [], 4, max_tool_calls=1)
+    assert out == ""
+    assert mock_search.call_count == 1
+    assert any("tool budget exhausted" in r.message for r in caplog.records)
+
+
 def test_run_web_research_disabled(monkeypatch):
     monkeypatch.setattr(web_research.settings, "web_search_enabled", False)
     model = MagicMock()
@@ -169,3 +227,15 @@ def test_run_web_research_enabled_binds_tools(monkeypatch):
     out = run_web_research(model, [])
     assert out == "brief"
     model.bind_tools.assert_called_once()
+
+
+def test_run_web_research_degrades_on_model_failure(monkeypatch, caplog):
+    monkeypatch.setattr(web_research.settings, "web_search_enabled", True)
+    model = MagicMock()
+    with patch(
+        "app.llm.web_research.gather_research", side_effect=RuntimeError("bind boom")
+    ):
+        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
+            out = run_web_research(model, [])
+    assert out == ""
+    assert any("web research unavailable" in r.message for r in caplog.records)
