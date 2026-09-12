@@ -16,7 +16,7 @@ import ipaddress
 import logging
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -212,6 +212,25 @@ def gather_research(
         logger.warning("web research yielded no context")
         return ""
 
+    def _run(call: dict[str, Any]) -> tuple[str, str]:
+        name = call["name"]
+        try:
+            result = impls[name](**call["args"])
+        except KeyError:
+            result = f"Error: no such tool '{name}'."
+        except Exception as exc:  # noqa: BLE001 - model-facing recovery
+            logger.warning("web tool %s failed: %s", name, exc)
+            result = "Error: something went wrong calling this tool."
+        return call["id"], str(result)
+
+    def _flush(calls: list[dict[str, Any]]) -> None:
+        if not calls:
+            return
+        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
+            results = list(pool.map(_run, calls))
+        for tool_call_id, content in results:
+            messages.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+
     for _ in range(max_rounds):
         resp = call_with_retry(model_with_tools.invoke, messages)
         if not isinstance(resp, AIMessage):
@@ -228,25 +247,6 @@ def gather_research(
 
         messages.append(resp)
         rounds += 1
-
-        def _run(call: dict) -> tuple[str, str]:
-            name = call["name"]
-            try:
-                result = impls[name](**call["args"])
-            except KeyError:
-                result = f"Error: no such tool '{name}'."
-            except Exception as exc:  # noqa: BLE001 - model-facing recovery
-                logger.warning("web tool %s failed: %s", name, exc)
-                result = "Error: something went wrong calling this tool."
-            return call["id"], str(result)
-
-        def _flush(calls: list) -> None:
-            if not calls:
-                return
-            with ThreadPoolExecutor(max_workers=len(calls)) as pool:
-                results = list(pool.map(_run, calls))
-            for tool_call_id, content in results:
-                messages.append(ToolMessage(content=content, tool_call_id=tool_call_id))
 
         pending = []
         for call in resp.tool_calls:
