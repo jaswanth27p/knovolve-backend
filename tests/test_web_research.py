@@ -62,25 +62,24 @@ def test_web_search_empty_returns_no_results():
         assert web_search("nothing") == "No results."
 
 
-def test_web_search_retries_once_then_succeeds(caplog):
+def test_web_search_pins_backends():
     with patch("app.llm.web_research.DDGS") as mock_ddgs:
-        mock_ddgs.return_value.text.side_effect = [
-            RuntimeError("boom"),
-            [{"title": "T", "href": "u", "body": "b"}],
+        mock_ddgs.return_value.text.return_value = [
+            {"title": "T", "href": "http://x", "body": "B"},
         ]
-        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
-            out = web_search("q")
-    assert "T" in out
-    assert any("retrying after error" in r.message for r in caplog.records)
+        web_search("python")
+    _, kwargs = mock_ddgs.return_value.text.call_args
+    assert "google" not in kwargs["backend"].split(",")
+    assert "brave" not in kwargs["backend"].split(",")
 
 
-def test_web_search_raises_after_one_retry(caplog):
+def test_web_search_failure_degrades_to_no_results(caplog):
     with patch("app.llm.web_research.DDGS") as mock_ddgs:
         mock_ddgs.return_value.text.side_effect = RuntimeError("boom")
-        with caplog.at_level(logging.ERROR, logger="app.llm.web_research"):
-            with pytest.raises(RuntimeError):
-                web_search("q")
-    assert any("failed after retry" in r.message for r in caplog.records)
+        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
+            assert web_search("q") == "No results."
+    mock_ddgs.return_value.text.assert_called_once()
+    assert any("failed fast" in r.message for r in caplog.records)
 
 
 def test_read_webpage_extracts_and_truncates(monkeypatch):
@@ -252,6 +251,62 @@ def test_gather_research_no_tools_no_summary_when_no_results():
     out = gather_research(model, [], 2, summarizer=summarizer)
     assert out == ""
     summarizer.invoke.assert_not_called()
+
+
+def test_gather_research_parallel_preserves_order():
+    import time
+    from langchain_core.messages import ToolMessage
+    model = MagicMock()
+    model.invoke.side_effect = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "web_search", "args": {"query": "slow"}, "id": "c1", "type": "tool_call"},
+                {"name": "web_search", "args": {"query": "fast"}, "id": "c2", "type": "tool_call"},
+            ],
+        ),
+        AIMessage(content="done"),
+    ]
+    def fake_search(query: str) -> str:
+        if query == "slow":
+            time.sleep(0.2)
+        return "SLOW" if query == "slow" else "FAST"
+    msgs: list = []
+    with patch("app.llm.web_research.web_search", side_effect=fake_search):
+        out = gather_research(model, msgs, 4)
+    assert out == "done"
+    tools = [m for m in msgs if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in tools] == ["c1", "c2"]
+    assert [m.content for m in tools] == ["SLOW", "FAST"]
+
+
+def test_gather_research_parallel_captures_errors_in_order():
+    from langchain_core.messages import ToolMessage
+    model = MagicMock()
+    model.invoke.side_effect = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "web_search", "args": {"query": "ok"}, "id": "c1", "type": "tool_call"},
+                {"name": "web_search", "args": {"query": "boom"}, "id": "c2", "type": "tool_call"},
+                {"name": "nope", "args": {}, "id": "c3", "type": "tool_call"},
+            ],
+        ),
+        AIMessage(content="recovered"),
+    ]
+    def fake_search(query: str) -> str:
+        if query == "boom":
+            raise RuntimeError("ddg down")
+        return "OK"
+    msgs: list = []
+    with patch("app.llm.web_research.web_search", side_effect=fake_search):
+        out = gather_research(model, msgs, 4)
+    assert out == "recovered"
+    tools = [m for m in msgs if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in tools] == ["c1", "c2", "c3"]
+    assert tools[0].content == "OK"
+    assert "something went wrong" in tools[1].content
+    assert "no such tool" in tools[2].content
 
 
 def test_run_web_research_disabled(monkeypatch):

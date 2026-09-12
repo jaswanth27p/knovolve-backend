@@ -4,7 +4,10 @@ DuckDuckGo search (via ``ddgs``) discovers candidate URLs; page text is
 extracted with ``trafilatura``. No embeddings or vector store: fetched text is
 handed to the model verbatim (truncated) and relevance is the model's call.
 
-Every search/fetch retries exactly once, then the caller degrades gracefully.
+Every fetch retries exactly once, then the caller degrades gracefully.
+Search is a single pass over a pinned engine set (no whole-call retry —
+re-running the fan-out would double a ~10-20s call); total search failure
+degrades to "No results."
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, TypeVar
 from urllib.parse import urljoin, urlsplit
 
@@ -35,6 +39,13 @@ _NO_RESULTS = "No results."
 _NO_CONTENT = "Could not extract content."
 
 _MAX_REDIRECTS = 5
+
+#: ddgs engines used for web search. google and brave aggressively rate-limit
+#: automated queries (429s that stall each search ~10s+), and yahoo's
+#: endpoint is TLS-flaky from this client — ddgs tries engines ~2 at a time
+#: and early-stops once it has enough results, so a short reliable set beats
+#: the full "auto" fan-out on latency with little relevance loss.
+_SEARCH_BACKENDS = "duckduckgo,wikipedia,mojeek,startpage,grokipedia"
 
 T = TypeVar("T")
 
@@ -76,15 +87,22 @@ def _retry_once(fn: Callable[[], T], *, what: str) -> T:
 
 
 def web_search(query: str) -> str:
-    """Search DuckDuckGo; return 'title | url | snippet' lines."""
-    def _run() -> list[dict]:
-        return DDGS().text(query, max_results=settings.web_search_max_results)
+    """Search the web; return 'title | url | snippet' lines.
 
+    Single pass, no whole-call retry: ddgs already falls through engines
+    internally, and re-running the full fan-out after a total failure doubles
+    a ~10-20s call. A total failure degrades to "No results." so the research
+    loop moves on instead of stalling on repeated searches.
+    """
     try:
-        results = _retry_once(_run, what="web_search")
-    except Exception as exc:  # noqa: BLE001 - final failure after one retry
-        logger.error("web_search failed after retry: %s", exc)
-        raise
+        results = DDGS().text(
+            query,
+            max_results=settings.web_search_max_results,
+            backend=_SEARCH_BACKENDS,
+        )
+    except Exception as exc:  # noqa: BLE001 - degraded, not fatal
+        logger.warning("web_search failed fast: %s", exc)
+        return _NO_RESULTS
 
     lines = [
         f"{r.get('title', '')} | {r.get('href', '')} | {r.get('body', '')}"
@@ -210,13 +228,9 @@ def gather_research(
 
         messages.append(resp)
         rounds += 1
-        for call in resp.tool_calls:
-            if max_tool_calls is not None and tool_calls >= max_tool_calls:
-                logger.warning("web research tool budget exhausted")
-                return _finish()
-            tool_calls += 1
+
+        def _run(call: dict) -> tuple[str, str]:
             name = call["name"]
-            logger.info("research round=%d tool_calls=%d", rounds, tool_calls)
             try:
                 result = impls[name](**call["args"])
             except KeyError:
@@ -224,7 +238,26 @@ def gather_research(
             except Exception as exc:  # noqa: BLE001 - model-facing recovery
                 logger.warning("web tool %s failed: %s", name, exc)
                 result = "Error: something went wrong calling this tool."
-            messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+            return call["id"], str(result)
+
+        def _flush(calls: list) -> None:
+            if not calls:
+                return
+            with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+                results = list(pool.map(_run, calls))
+            for tool_call_id, content in results:
+                messages.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+
+        pending = []
+        for call in resp.tool_calls:
+            if max_tool_calls is not None and tool_calls >= max_tool_calls:
+                logger.warning("web research tool budget exhausted")
+                _flush(pending)
+                return _finish()
+            tool_calls += 1
+            logger.info("research round=%d tool_calls=%d", rounds, tool_calls)
+            pending.append(call)
+        _flush(pending)
 
     return _finish()
 
