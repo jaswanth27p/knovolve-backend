@@ -1,5 +1,6 @@
 from typing import Literal
 from pydantic import BaseModel
+from app.config import settings
 from app.llm.factory import get_chat_model
 from app.llm.prompts import GENERATE_SECTION_OUTLINE_PROMPT
 from app.llm.retry import call_with_retry
@@ -24,4 +25,4 @@ def generate_section_outline(chapter_title: str, chapter_objective: str) -> list
     )
     result = call_with_retry(structured.invoke, messages)
     sections = result.sections if isinstance(result, SectionOutlineResponse) else result
-    return sorted(sections, key=lambda s: s.order)
+    return sorted(sections, key=lambda s: s.order)[: settings.chapter_max_sections]

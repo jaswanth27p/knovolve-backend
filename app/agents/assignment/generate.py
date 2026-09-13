@@ -6,6 +6,7 @@ diagram rendering), so a crash just retries the whole thing; there is
 nothing slow enough mid-way to need per-step persistence.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 from sqlalchemy import delete, func, select, update
@@ -164,6 +165,8 @@ def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
     if content is None:
         raise ValueError(f"ChapterContent {chapter_content_id} not found")
     chapter = db.get(Chapter, content.chapter_id)
+    if chapter is None:
+        raise ValueError(f"Chapter {content.chapter_id} not found")
 
     assignment, created = _get_or_create_assignment(
         db, level="chapter", scope=content.scope, chapter_content_id=chapter_content_id,
@@ -175,12 +178,25 @@ def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
     sections = _teaching_sections(db, chapter_content_id)
 
     try:
+        # One LLM call per teaching section, all independent; fan them out. The
+        # DB session stays on this thread — only the pure LLM call runs in the
+        # worker threads, and results are assembled in section order.
         drafts_by_section: list[tuple[int | None, list]] = []
-        for section in sections:
-            drafts = generate_questions_for_section(
-                chapter.title, chapter.objective, section.heading, section.body_markdown, section.examples,
-            )
-            drafts_by_section.append((section.id, drafts))
+        if sections:
+            workers = max(1, min(settings.assignment_question_max_workers, len(sections)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                drafts_list = list(
+                    executor.map(
+                        lambda section: generate_questions_for_section(
+                            chapter.title, chapter.objective,
+                            section.heading, section.body_markdown, section.examples,
+                        ),
+                        sections,
+                    )
+                )
+            drafts_by_section = [
+                (section.id, drafts) for section, drafts in zip(sections, drafts_list)
+            ]
 
         total = sum(len(d) for _, d in drafts_by_section)
         if total < MIN_QUESTIONS:
@@ -236,7 +252,12 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
     ).all()
 
     try:
-        all_drafts: list[tuple[int | None, Any]] = []
+        # Pass 1 (main thread, DB only): resolve each chapter's context and lay
+        # out an ordered list of "slots". A reuse slot carries an existing
+        # question; a fresh slot marks one LLM call whose result fills the slot.
+        # "fresh_one" is the ready-chapter-assignment branch (take only the
+        # first draft); "fresh_all" is the rebuild branch (take every draft).
+        slots: list[tuple] = []
         for chapter in chapters:
             content = db.scalar(
                 select(ChapterContent).where(
@@ -262,22 +283,46 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
                 ).all()
                 reuse_count = max(1, -(-len(existing_questions) // 2))  # ceil(n/2), min 1
                 for q in _spread_by_concept(existing_questions, reuse_count):
-                    all_drafts.append((q.source_section_id, q))
-
+                    slots.append(("reuse", q, None, None))
                 if sections:
-                    fresh = generate_questions_for_section(
-                        chapter.title, chapter.objective, sections[0].heading,
-                        sections[0].body_markdown, sections[0].examples,
-                    )
-                    if fresh:
-                        all_drafts.append((sections[0].id, fresh[0]))
+                    slots.append(("fresh_one", None, chapter, sections[0]))
             else:
                 for section in sections:
-                    drafts = generate_questions_for_section(
-                        chapter.title, chapter.objective, section.heading, section.body_markdown, section.examples,
+                    slots.append(("fresh_all", None, chapter, section))
+
+        # Pass 2: run every fresh LLM call concurrently (pure calls, no DB),
+        # then slot the results back in order.
+        fresh_positions = [i for i, slot in enumerate(slots) if slot[0] != "reuse"]
+        fresh_results: dict[int, list] = {}
+        if fresh_positions:
+            jobs = [slots[i] for i in fresh_positions]
+            workers = max(1, min(settings.assignment_question_max_workers, len(jobs)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(
+                    executor.map(
+                        lambda slot: generate_questions_for_section(
+                            slot[2].title, slot[2].objective,
+                            slot[3].heading, slot[3].body_markdown, slot[3].examples,
+                        ),
+                        jobs,
                     )
-                    for q in drafts:
-                        all_drafts.append((section.id, q))
+                )
+            fresh_results = dict(zip(fresh_positions, results))
+
+        # Pass 3 (main thread): assemble in original order.
+        all_drafts: list[tuple[int | None, Any]] = []
+        for i, slot in enumerate(slots):
+            kind = slot[0]
+            if kind == "reuse":
+                q = slot[1]
+                all_drafts.append((q.source_section_id, q))
+            elif kind == "fresh_one":
+                drafts = fresh_results.get(i) or []
+                if drafts:
+                    all_drafts.append((slot[3].id, drafts[0]))
+            else:  # fresh_all
+                for q in fresh_results.get(i) or []:
+                    all_drafts.append((slot[3].id, q))
 
         if len(all_drafts) < MIN_QUESTIONS:
             needed = MIN_QUESTIONS - len(all_drafts)

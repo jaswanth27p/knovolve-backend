@@ -9,7 +9,10 @@ from app.models.course import Course as CourseModel
 from app.models.export import CourseGenerationRun
 from app.models.user import User
 from app.services import generation as generation_service
-from app.tasks.course_generation_task import run_course_generation_task
+from app.tasks.course_generation_task import (
+    _dependency_levels,
+    run_course_generation_task,
+)
 
 client = TestClient(app)
 
@@ -130,7 +133,11 @@ def test_worker_executes_planned_units_and_completes():
         assert [u["status"] for u in run.unit_states] == ["done"] * 5
 
 
-def test_unit_failure_marks_run_failed_without_losing_progress():
+def test_unit_failure_marks_run_failed_without_losing_progress(monkeypatch):
+    from app.config import settings
+    # Serial execution makes the side_effect ordering deterministic: the first
+    # content unit (C1) fails, the rest succeed.
+    monkeypatch.setattr(settings, "generation_run_max_parallel_units", 1)
     run_id = _seed_pending_run("generation-failure-course")
     with patch("app.tasks.course_generation_task.ensure_chapter_content",
               side_effect=[ValueError("LLM failed"), None]), \
@@ -147,3 +154,17 @@ def test_unit_failure_marks_run_failed_without_losing_progress():
         assert run.completed_units == 5
         assert [u["status"] for u in run.unit_states] == ["failed", "done", "done", "done", "done"]
         assert run.error == "Course generation failed. Please try again."
+
+
+def test_dependency_levels_group_content_before_dependents():
+    units = [
+        {"unit_id": "content:1", "depends_on": []},
+        {"unit_id": "chapter_assignment:chapter:1", "depends_on": ["content:1"]},
+        {"unit_id": "content:2", "depends_on": []},
+        {"unit_id": "module_assignment:9", "depends_on": ["content:1", "content:2"]},
+    ]
+    waves = _dependency_levels(units)
+    assert [[u["unit_id"] for u in wave] for wave in waves] == [
+        ["content:1", "content:2"],
+        ["chapter_assignment:chapter:1", "module_assignment:9"],
+    ]

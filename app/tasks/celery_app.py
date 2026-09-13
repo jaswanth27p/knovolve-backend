@@ -49,6 +49,15 @@ celery_app.conf.update(
     broker_transport_options={
         "visibility_timeout": settings.celery_visibility_timeout_seconds
     },
+    # Bound concurrency and memory. `worker_concurrency` is the hard cap on
+    # simultaneous tasks (prefork child processes); max-memory-per-child recycles
+    # a child that bloats or leaks after a task, and max-tasks-per-child is a
+    # blunter backstop. The memory/task limits are prefork-only and are ignored
+    # by the solo pool. See AGENTS.md for the macOS prefork caveat.
+    worker_concurrency=settings.celery_worker_concurrency,
+    worker_prefetch_multiplier=1,
+    worker_max_memory_per_child=settings.celery_worker_max_memory_per_child_kb,
+    worker_max_tasks_per_child=settings.celery_worker_max_tasks_per_child,
 )
 
 # Tests run the task body synchronously (no worker, no broker round-trip) by

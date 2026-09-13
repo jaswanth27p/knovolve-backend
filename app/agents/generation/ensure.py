@@ -5,10 +5,12 @@ rules without yielding HTTP events. It is safe to call repeatedly and safe to
 call while a chapter page is generating the same content: already-persisted
 sections are adopted, not duplicated.
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from app.config import settings
 from app.agents.assignment.generate import generate_chapter_assignment, generate_module_assignment
 from app.agents.chapter_content.generate import _get_or_create_content
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
@@ -84,40 +86,56 @@ def ensure_chapter_content(db: Session, chapter: Chapter) -> None:
         .filter_by(chapter_content_id=content.id)
         .all()
     }
-    for order, entry in enumerate(content.outline):
-        if order in done_orders:
-            continue
-        result = generate_chapter_section(
-            chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"],
-            content.research_notes or FALLBACK_RESEARCH_NOTES,
-        )
-        diagram_spec = _diagram_spec_dict(result.diagram_spec)
-        section = ChapterContentSection(
-            chapter_content_id=content.id,
-            order=order,
-            heading=entry["heading"],
-            kind=entry["kind"],
-            body_markdown=result.body_markdown,
-            examples=[example.model_dump() for example in result.examples],
-            diagram_spec=diagram_spec,
-            diagram_status="pending" if diagram_spec is not None else None,
-        )
-        db.add(section)
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            section = db.scalar(
-                select(ChapterContentSection).where(
-                    ChapterContentSection.chapter_content_id == content.id,
-                    ChapterContentSection.order == order,
+    pending = [
+        (order, entry)
+        for order, entry in enumerate(content.outline)
+        if order not in done_orders
+    ]
+    if pending:
+        # Section bodies are independent LLM calls; fan them out exactly like
+        # the streaming path does. The calls run in worker threads, but every
+        # DB read/write stays on this thread (SQLAlchemy sessions are not
+        # thread-safe); results are persisted in outline order.
+        max_workers = max(1, min(settings.chapter_section_max_workers, len(pending)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(
+                executor.map(
+                    lambda pair: generate_chapter_section(
+                        chapter.title, chapter.objective,
+                        pair[1]["heading"], pair[1]["objective"], pair[1]["kind"],
+                        content.research_notes or FALLBACK_RESEARCH_NOTES,
+                    ),
+                    pending,
                 )
             )
-            if section is None:
-                raise
-        else:
-            db.refresh(section)
-            _finalize_diagram(db, section)
+        for (order, entry), result in zip(pending, results):
+            diagram_spec = _diagram_spec_dict(result.diagram_spec)
+            section = ChapterContentSection(
+                chapter_content_id=content.id,
+                order=order,
+                heading=entry["heading"],
+                kind=entry["kind"],
+                body_markdown=result.body_markdown,
+                examples=[example.model_dump() for example in result.examples],
+                diagram_spec=diagram_spec,
+                diagram_status="pending" if diagram_spec is not None else None,
+            )
+            db.add(section)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                section = db.scalar(
+                    select(ChapterContentSection).where(
+                        ChapterContentSection.chapter_content_id == content.id,
+                        ChapterContentSection.order == order,
+                    )
+                )
+                if section is None:
+                    raise
+            else:
+                db.refresh(section)
+                _finalize_diagram(db, section)
     persisted = {
         order
         for order, in db.query(ChapterContentSection.order)

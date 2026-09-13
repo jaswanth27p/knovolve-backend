@@ -37,7 +37,7 @@ def test_generate_outline_uses_web_research(monkeypatch):
     mock_model.with_structured_output.return_value.invoke.return_value = fake_modules
 
     with patch("app.agents.course_creation.nodes.generate_outline.get_chat_model", return_value=mock_model), \
-         patch("app.agents.course_creation.nodes.generate_outline.run_web_research",
+         patch("app.agents.course_creation.nodes.generate_outline.fetch_structure_research",
                return_value="WEB BRIEF") as mock_research:
         result = generate_outline(state)
 

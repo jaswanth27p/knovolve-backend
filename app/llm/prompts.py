@@ -61,84 +61,6 @@ CANONICALIZE_TOPIC_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 # ---------------------------------------------------------------------------
-# web_research (run before generate_outline / generate_chapters)
-# ---------------------------------------------------------------------------
-# The model decides whether the topic needs live research; the loop is bounded
-# by settings.web_research_max_tool_rounds. Output feeds the `research_notes`
-# input of the generation prompts, never the structured-output schema.
-WEB_RESEARCH_PROMPT = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            "You are a research assistant for Knovolve, an adaptive learning "
-            "platform. Before a course is designed, gather accurate, current "
-            "context about the topic using the tools available to you.\n\n"
-            "Tools:\n"
-            "- web_search(query): DuckDuckGo search; returns lines formatted "
-            "'title | url | snippet'.\n"
-            "- read_webpage(url): fetch a page and return its main text.\n\n"
-            "Guidance:\n"
-            "- Prefer authoritative sources (official docs, standards bodies, "
-            "reputable references) over content farms.\n"
-            "- Read at least one promising page when the topic benefits from "
-            "specific or current detail; for stable, well-known topics you may "
-            "choose not to search at all.\n"
-            "- When done, reply with concise research notes: the key facts, "
-            "terminology, and standard topic structure you found, each with "
-            "the source URL it came from.\n"
-            "- Never invent facts, versions, or sources you did not actually "
-            "see in a tool result. If the tools return nothing useful, say so "
-            "and give best-effort general notes clearly marked as "
-            "prior-knowledge.\n"
-            "- Do not design the course; only gather context.",
-        ),
-        ("human", "Research this topic: {topic_raw}"),
-    ]
-)
-
-# ---------------------------------------------------------------------------
-# chapter_content research (run once per chapter version, after its outline is
-# planned, before its section bodies). Same bounded tool loop as
-# WEB_RESEARCH_PROMPT but scoped to one chapter so the notes are usable
-# verbatim by every section writer.
-CHAPTER_RESEARCH_PROMPT = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            "You are a research assistant for Knovolve, an adaptive learning "
-            "platform. A chapter of a course is about to be written. Use the "
-            "tools available to you to gather accurate, current context that "
-            "the section writers can rely on.\n\n"
-            "Tools:\n"
-            "- web_search(query): DuckDuckGo search; returns lines formatted "
-            "'title | url | snippet'.\n"
-            "- read_webpage(url): fetch a page and return its main text.\n\n"
-            "Guidance:\n"
-            "- Prefer authoritative sources (official docs, standards bodies, "
-            "reputable references) over content farms.\n"
-            "- Read at least one promising page when the topic benefits from "
-            "specific or current detail.\n"
-            "- Reply with concise research notes: key facts, terminology, "
-            "concrete examples, common pitfalls, and version-specific details, "
-            "each with the source URL it came from. Keep notes relevant to the "
-            "listed sections.\n"
-            "- Never invent facts, versions, or sources you did not actually "
-            "see in a tool result. If the tools return nothing useful, say so "
-            "and give best-effort general notes clearly marked as "
-            "prior-knowledge.\n"
-            "- Do not write the lesson itself; only gather context.",
-        ),
-        (
-            "human",
-            "Chapter: {chapter_title} — {chapter_objective}\n\n"
-            "Planned section headings:\n{section_headings}\n\n"
-            "Weak concepts to target (empty for a full teaching version):\n"
-            "{weak_concepts}\n\nGather research notes for this chapter.",
-        ),
-    ]
-)
-
-# ---------------------------------------------------------------------------
 # generate_outline.generate_outline
 # ---------------------------------------------------------------------------
 # Structured output (OutlineResponse) handles format enforcement, so this
@@ -320,6 +242,8 @@ GENERATE_SECTION_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
             "what a learner can do after that section.\n"
             "- Give each section a specific, content-bearing heading — not "
             "generic labels like 'Overview' or 'Summary'.\n"
+            "- Produce between 3 and 6 sections. Prefer fewer, denser sections "
+            "over many thin ones; never exceed 6.\n"
             "- Number sections starting at 1, matching their intended order.",
         ),
         (

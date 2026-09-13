@@ -1,13 +1,14 @@
-"""Web research tools for grounding LLM generation in live sources.
+"""Web research for grounding LLM generation in live sources.
 
 DuckDuckGo search (via ``ddgs``) discovers candidate URLs; page text is
 extracted with ``trafilatura``. No embeddings or vector store: fetched text is
 handed to the model verbatim (truncated) and relevance is the model's call.
 
-Every fetch retries exactly once, then the caller degrades gracefully.
-Search is a single pass over a pinned engine set (no whole-call retry —
-re-running the fan-out would double a ~10-20s call); total search failure
-degrades to "No results."
+Research is a single deterministic pass, not an agent tool loop: one search,
+fetch the top N results once (in parallel), return the concatenated text. The
+old LLM-driven tool loop was removed because it cost multiple model round-trips
+per node and dominated course-creation wall time. Every fetch is best-effort;
+a total failure degrades to no notes ("No results." / "").
 """
 
 from __future__ import annotations
@@ -16,23 +17,18 @@ import ipaddress
 import logging
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, TypeVar
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 import trafilatura
 from ddgs import DDGS
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import Runnable
-from langchain_core.tools import BaseTool, tool
 
 from app.config import settings
-from app.llm.retry import call_with_retry
 
 logger = logging.getLogger(__name__)
 
-#: Injected into the generation prompts when research produced nothing (tool
-#: failure, flag off, or the model chose not to search).
+#: Injected into the generation prompts when research produced nothing (flag
+#: off, no results, or every fetch failed).
 FALLBACK_RESEARCH_NOTES = "(no web research available)"
 
 _NO_RESULTS = "No results."
@@ -46,8 +42,6 @@ _MAX_REDIRECTS = 5
 #: and early-stops once it has enough results, so a short reliable set beats
 #: the full "auto" fan-out on latency with little relevance loss.
 _SEARCH_BACKENDS = "duckduckgo,wikipedia,mojeek,startpage,grokipedia"
-
-T = TypeVar("T")
 
 
 def _assert_public_url(url: str) -> None:
@@ -77,22 +71,13 @@ def _assert_public_url(url: str) -> None:
             raise ValueError(f"blocked non-public address for {host!r}: {ip}")
 
 
-def _retry_once(fn: Callable[[], T], *, what: str) -> T:
-    """Run ``fn``; on exception log a warning and try exactly once more."""
-    try:
-        return fn()
-    except Exception as exc:  # noqa: BLE001 - retried once, then re-raised
-        logger.warning("%s retrying after error: %s", what, exc)
-        return fn()
-
-
 def web_search(query: str) -> str:
     """Search the web; return 'title | url | snippet' lines.
 
     Single pass, no whole-call retry: ddgs already falls through engines
     internally, and re-running the full fan-out after a total failure doubles
     a ~10-20s call. A total failure degrades to "No results." so the research
-    loop moves on instead of stalling on repeated searches.
+    pass moves on instead of stalling on repeated searches.
     """
     try:
         results = DDGS().text(
@@ -113,7 +98,10 @@ def web_search(query: str) -> str:
 
 
 def _fetch_and_extract(url: str) -> str:
-    """Fetch ``url`` (following redirects) and return its extracted main text."""
+    """Fetch ``url`` (following redirects) and return its extracted main text.
+
+    Raises on a blocked/non-public URL, a fetch failure, or too many redirects.
+    """
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
         _assert_public_url(current)
@@ -134,27 +122,11 @@ def _fetch_and_extract(url: str) -> str:
     raise ValueError("too many redirects")
 
 
-def read_webpage(url: str) -> str:
-    """Fetch ``url`` and return its extracted main text, truncated.
-
-    Retries exactly once (course-structure research path).
-    """
-    try:
-        text = _retry_once(lambda: _fetch_and_extract(url), what="read_webpage")
-    except Exception as exc:  # noqa: BLE001 - final failure after one retry
-        logger.error("read_webpage failed after retry: %s", exc)
-        raise
-
-    text = text or _NO_CONTENT
-    logger.info("read_webpage url=%s chars=%d", url, len(text))
-    return text
-
-
 def read_webpage_once(url: str) -> str:
     """Fetch ``url`` once (no retry); returns ``_NO_CONTENT`` on any failure.
 
-    Used by the deterministic chapter-research pass, which must not add
-    retry latency to the streaming chapter path.
+    Used by the deterministic research pass, which must not add retry latency
+    to the streaming chapter path.
     """
     try:
         text = _fetch_and_extract(url)
@@ -176,24 +148,21 @@ def _search_targets(search_output: str, limit: int) -> list[tuple[str, str]]:
     return targets
 
 
-def fetch_chapter_research(
+def _one_shot_research(
     query: str,
     *,
-    top_urls: int = 3,
-    max_chars_per_page: int = 4000,
-    max_total_chars: int = 10000,
+    top_urls: int,
+    max_chars_per_page: int,
+    max_total_chars: int,
+    label: str,
 ) -> str:
-    """Deterministic one-shot chapter research.
-
-    One ``web_search`` → fetch the top ``top_urls`` results once (no retry) in
-    parallel → concatenate the extracted text as research notes. No agent tool
-    loop, no round budget, no summarizer model call. Returns ``""`` when
-    nothing usable was gathered, so callers degrade to no notes.
-    """
+    """One ``web_search`` → fetch the top ``top_urls`` results once (no retry)
+    in parallel → concatenate the extracted text as research notes. Returns
+    ``""`` when nothing usable was gathered, so callers degrade to no notes."""
     try:
         search_output = web_search(query)
     except Exception as exc:  # noqa: BLE001 - best-effort
-        logger.warning("chapter research search failed: %s", exc)
+        logger.warning("%s research search failed: %s", label, exc)
         return ""
     if not search_output or search_output == _NO_RESULTS:
         return ""
@@ -213,156 +182,55 @@ def fetch_chapter_research(
 
     notes = "\n\n".join(blocks)[:max_total_chars].strip()
     logger.info(
-        "chapter research one-shot query=%s urls=%d blocks=%d notes_chars=%d",
-        query, len(targets), len(blocks), len(notes),
+        "%s research one-shot query=%s urls=%d blocks=%d notes_chars=%d",
+        label, query, len(targets), len(blocks), len(notes),
     )
     return notes
 
 
-def build_web_tools() -> list[BaseTool]:
-    """LangChain tools for the research phase."""
-
-    @tool("web_search")
-    def _web_search(query: str) -> str:
-        """Search the web with DuckDuckGo. Input: a search query. Returns
-        result lines formatted as 'title | url | snippet'."""
-        return web_search(query)
-
-    @tool("read_webpage")
-    def _read_webpage(url: str) -> str:
-        """Fetch a web page and return its main text content. Input: a full
-        URL including the https:// scheme."""
-        return read_webpage(url)
-
-    return [_web_search, _read_webpage]
-
-
-def _content_text(resp: object) -> str:
-    if isinstance(resp, AIMessage) and isinstance(resp.content, str):
-        return resp.content
-    return ""
-
-
-def gather_research(
-    model_with_tools: Runnable,
-    messages: list[BaseMessage],
-    max_rounds: int,
-    max_tool_calls: int | None = None,
-    summarizer: Runnable | None = None,
-) -> str:
-    """Run a bounded tool loop; return the model's final research brief.
-
-    A tool failure after its internal retry becomes an error ``ToolMessage``
-    and the loop continues (graceful degrade). When the round budget or the
-    tool-call cap is exhausted and at least one tool result was gathered, a
-    final unbound-model summarization pass (`summarizer`) turns the tool
-    results into the brief. Returns ``""`` when nothing was gathered or no
-    text could be produced.
-    """
-    impls: dict[str, Callable[..., str]] = {
-        "web_search": web_search,
-        "read_webpage": read_webpage,
-    }
-    rounds = 0
-    tool_calls = 0
-
-    def _finish() -> str:
-        if summarizer is not None and tool_calls > 0:
-            try:
-                messages.append(HumanMessage(content=(
-                    "Stop researching now and output your concise research notes "
-                    "from the tool results above, with source URLs. Do not call any tools."
-                )))
-                resp = call_with_retry(summarizer.invoke, messages)
-                content = _content_text(resp)
-                if content:
-                    logger.info(
-                        "web research finished (summary) rounds=%d tool_calls=%d notes_chars=%d",
-                        rounds, tool_calls, len(content),
-                    )
-                    return content
-            except Exception as exc:  # noqa: BLE001 - best-effort summary
-                logger.warning("web research summary failed: %s", exc)
-        logger.warning("web research yielded no context")
-        return ""
-
-    def _run(call: dict[str, Any]) -> tuple[str, str]:
-        name = call["name"]
-        try:
-            result = impls[name](**call["args"])
-        except KeyError:
-            result = f"Error: no such tool '{name}'."
-        except Exception as exc:  # noqa: BLE001 - model-facing recovery
-            logger.warning("web tool %s failed: %s", name, exc)
-            result = "Error: something went wrong calling this tool."
-        return call["id"], str(result)
-
-    def _flush(calls: list[dict[str, Any]]) -> None:
-        if not calls:
-            return
-        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
-            results = list(pool.map(_run, calls))
-        for tool_call_id, content in results:
-            messages.append(ToolMessage(content=content, tool_call_id=tool_call_id))
-
-    for _ in range(max_rounds):
-        resp = call_with_retry(model_with_tools.invoke, messages)
-        if not isinstance(resp, AIMessage):
-            break
-        if not resp.tool_calls:
-            content = _content_text(resp)
-            logger.info(
-                "web research finished rounds=%d tool_calls=%d notes_chars=%d",
-                rounds, tool_calls, len(content),
-            )
-            if not content:
-                return _finish()
-            return content
-
-        messages.append(resp)
-        rounds += 1
-
-        pending = []
-        for call in resp.tool_calls:
-            if max_tool_calls is not None and tool_calls >= max_tool_calls:
-                logger.warning("web research tool budget exhausted")
-                _flush(pending)
-                return _finish()
-            tool_calls += 1
-            logger.info("research round=%d tool_calls=%d", rounds, tool_calls)
-            pending.append(call)
-        _flush(pending)
-
-    return _finish()
-
-
-def run_web_research(
-    model: Runnable,
-    messages: list[BaseMessage],
+def fetch_chapter_research(
+    query: str,
     *,
-    enabled: bool | None = None,
-    max_rounds: int | None = None,
-    max_tool_calls: int | None = None,
+    top_urls: int = 3,
+    max_chars_per_page: int = 4000,
+    max_total_chars: int = 10000,
 ) -> str:
-    """Feature-flagged entry point: research the given messages, or "" if off.
+    """Deterministic one-shot chapter research."""
+    return _one_shot_research(
+        query,
+        top_urls=top_urls,
+        max_chars_per_page=max_chars_per_page,
+        max_total_chars=max_total_chars,
+        label="chapter",
+    )
 
-    `enabled`/`max_rounds`/`max_tool_calls` default to the course-structure
-    settings; callers (chapter-content research) may override them to run
-    under an independent flag and budget.
+
+def fetch_structure_research(
+    query: str,
+    *,
+    top_urls: int | None = None,
+    max_chars_per_page: int | None = None,
+    max_total_chars: int | None = None,
+) -> str:
+    """Deterministic one-shot research for course structure (outline/chapters).
+
+    Honors ``web_search_enabled``; returns ``""`` when disabled or nothing
+    usable was gathered so nodes fall back to ``(no web research available)``.
     """
-    if enabled is None:
-        enabled = settings.web_search_enabled
-    if not enabled:
+    if not settings.web_search_enabled:
         return ""
-    try:
-        bound = model.bind_tools(build_web_tools())  # pyright: ignore[reportAttributeAccessIssue]
-        return gather_research(
-            bound,
-            messages,
-            max_rounds if max_rounds is not None else settings.web_research_max_tool_rounds,
-            max_tool_calls if max_tool_calls is not None else settings.web_research_max_tool_calls,
-            summarizer=model,
-        )
-    except Exception as exc:  # noqa: BLE001 - research is best-effort; degrade
-        logger.warning("web research unavailable; continuing without it: %s", exc)
-        return ""
+    return _one_shot_research(
+        query,
+        top_urls=top_urls if top_urls is not None else settings.structure_research_top_urls,
+        max_chars_per_page=(
+            max_chars_per_page
+            if max_chars_per_page is not None
+            else settings.structure_research_max_chars_per_page
+        ),
+        max_total_chars=(
+            max_total_chars
+            if max_total_chars is not None
+            else settings.structure_research_max_total_chars
+        ),
+        label="structure",
+    )

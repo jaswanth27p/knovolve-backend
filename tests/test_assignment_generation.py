@@ -43,9 +43,14 @@ def _draft(tag: str, qtype: str = "mcq") -> QuestionDraft:
 
 def test_generates_questions_per_section_no_topup_needed():
     content_id = _make_ready_chapter_content("asg-gen-a", section_count=2)
-    section_drafts = [[_draft("s0-c1"), _draft("s0-c2")], [_draft("s1-c1")]]
 
-    with patch("app.agents.assignment.generate.generate_questions_for_section", side_effect=section_drafts), \
+    # Keyed on the section heading, not call order: questions are generated in
+    # parallel, so a list side_effect would be assigned to whichever thread ran
+    # first.
+    def fake_questions(chapter_title, chapter_objective, heading, body_markdown, examples):
+        return [_draft("s0-c1"), _draft("s0-c2")] if heading == "Section 0" else [_draft("s1-c1")]
+
+    with patch("app.agents.assignment.generate.generate_questions_for_section", side_effect=fake_questions), \
          patch("app.agents.assignment.generate.generate_topup_questions") as mock_topup:
         with SessionLocal() as db:
             generate_chapter_assignment(content_id, db)

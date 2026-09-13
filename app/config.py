@@ -62,8 +62,13 @@ class Settings(BaseSettings):
     web_search_enabled: bool = True
     web_search_max_results: int = 5
     web_page_max_chars: int = 8000
-    web_research_max_tool_rounds: int = 4
-    web_research_max_tool_calls: int = 8
+    # One-shot structure research, tuned independently of chapter research.
+    structure_research_top_urls: int = 3
+    structure_research_max_chars_per_page: int = 4000
+    structure_research_max_total_chars: int = 10000
+    # Course-structure nodes whose per-item work is independent (one outline
+    # research + one per module) fan out up to this many threads.
+    course_structure_max_workers: int = 4
     # Chapter-content web research. Governed independently of
     # web_search_enabled (which gates course-structure research) because
     # chapter content streams to a waiting learner, so its latency/cost must
@@ -71,11 +76,8 @@ class Settings(BaseSettings):
     #
     # Chapter research is a single deterministic pass (no agent tool loop):
     # one search, fetch the top `chapter_research_top_urls` results once, and
-    # hand the extracted text to the section writers. The legacy round/call
-    # budgets are kept for config compatibility but are no longer used.
+    # hand the extracted text to the section writers.
     chapter_research_enabled: bool = True
-    chapter_research_max_tool_rounds: int = 3
-    chapter_research_max_tool_calls: int = 6
     chapter_research_top_urls: int = 3
     chapter_research_max_chars_per_page: int = 4000
     chapter_research_max_total_chars: int = 10000
@@ -83,6 +85,29 @@ class Settings(BaseSettings):
     # concurrently so a chapter's wall-clock time is roughly
     # ceil(sections / workers) rather than sections * latency.
     chapter_section_max_workers: int = 4
+    # Assignment questions are generated per teaching section; fan those LLM
+    # calls out the same way as section bodies.
+    assignment_question_max_workers: int = 4
+    # Hard cap on sections per chapter outline. Bounds chapter wall-time; the
+    # outline prompt also asks for 3-6, this is the safety net if it ignores that.
+    chapter_max_sections: int = 6
+    # Full-course generation: independent units (different chapters' content and
+    # assignments) run up to this many at a time within one run. Combined with
+    # chapter_section_max_workers this bounds concurrent LLM calls per process to
+    # roughly generation_run_max_parallel_units * chapter_section_max_workers.
+    generation_run_max_parallel_units: int = 4
+    # Celery worker resource bounds. `concurrency` is the number of prefork
+    # child processes (a hard cap on simultaneous units across ALL runs on this
+    # worker). The memory/task limits recycle a child that leaks or bloats; they
+    # only apply to the prefork pool, not solo.
+    celery_worker_concurrency: int = 4
+    celery_worker_max_memory_per_child_kb: int = 512_000
+    celery_worker_max_tasks_per_child: int = 100
+    # The full-course run task fans units out across threads and can legitimately
+    # outlive the default 30-minute per-task cap on prefork (which solo ignored).
+    # Individual units are idempotent, so a redelivered run re-does only what is
+    # missing; this only needs to exceed a healthy parallel sweep.
+    celery_generation_run_time_limit_seconds: int = 2 * 60 * 60
     web_request_timeout_seconds: float = 15.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.

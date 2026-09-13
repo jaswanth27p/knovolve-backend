@@ -2,14 +2,11 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from app.config import Settings
 from app.llm import web_research
 from app.llm.web_research import (
-    gather_research,
-    read_webpage,
-    run_web_research,
+    read_webpage_once,
     web_search,
 )
 
@@ -19,15 +16,38 @@ def test_settings_defaults_present():
     assert s.web_search_enabled is True
     assert s.web_search_max_results == 5
     assert s.web_page_max_chars == 8000
-    assert s.web_research_max_tool_rounds == 4
-    assert s.web_research_max_tool_calls == 8
     assert s.web_request_timeout_seconds == 15.0
     assert s.chapter_research_enabled is True
-    assert s.chapter_research_max_tool_rounds == 3
-    assert s.chapter_research_max_tool_calls == 6
     assert s.chapter_research_top_urls == 3
     assert s.chapter_research_max_chars_per_page == 4000
     assert s.chapter_research_max_total_chars == 10000
+    assert s.structure_research_top_urls == 3
+    assert s.structure_research_max_chars_per_page == 4000
+    assert s.structure_research_max_total_chars == 10000
+    assert s.course_structure_max_workers == 4
+    assert s.chapter_max_sections == 6
+    assert s.generation_run_max_parallel_units == 4
+    assert s.assignment_question_max_workers == 4
+    assert s.celery_worker_concurrency == 4
+    assert s.celery_worker_max_memory_per_child_kb == 512_000
+    assert s.celery_worker_max_tasks_per_child == 100
+    assert s.celery_generation_run_time_limit_seconds == 7200
+
+
+def test_fetch_structure_research_disabled_returns_empty(monkeypatch):
+    monkeypatch.setattr(web_research.settings, "web_search_enabled", False)
+    with patch("app.llm.web_research.web_search") as mock_search:
+        assert web_research.fetch_structure_research("topic") == ""
+    mock_search.assert_not_called()
+
+
+def test_fetch_structure_research_one_shot(monkeypatch):
+    monkeypatch.setattr(web_research.settings, "web_search_enabled", True)
+    monkeypatch.setattr(web_research.settings, "structure_research_top_urls", 1)
+    with patch("app.llm.web_research.web_search", return_value="T | http://a | s"), \
+         patch("app.llm.web_research.read_webpage_once", return_value="body"):
+        out = web_research.fetch_structure_research("topic")
+    assert "URL: http://a" in out and "body" in out
 
 
 def test_fetch_chapter_research_one_search_top_urls_no_retry():
@@ -111,33 +131,22 @@ def test_web_search_failure_degrades_to_no_results(caplog):
     assert any("failed fast" in r.message for r in caplog.records)
 
 
-def test_read_webpage_extracts_and_truncates(monkeypatch):
+def test_fetch_and_extract_extracts_and_truncates(monkeypatch):
     monkeypatch.setattr(web_research.settings, "web_page_max_chars", 5)
     with patch("app.llm.web_research.httpx") as mock_httpx, \
          patch("app.llm.web_research.trafilatura") as mock_traf:
         mock_httpx.get.return_value = _resp("<html/>")
         mock_traf.extract.return_value = "abcdefghij"
-        out = read_webpage("http://93.184.216.34/")
+        out = web_research._fetch_and_extract("http://93.184.216.34/")
     assert out == "abcde"
 
 
-def test_read_webpage_no_content():
+def test_read_webpage_once_no_content():
     with patch("app.llm.web_research.httpx") as mock_httpx, \
          patch("app.llm.web_research.trafilatura") as mock_traf:
         mock_httpx.get.return_value = _resp("<html/>")
         mock_traf.extract.return_value = None
-        assert read_webpage("http://93.184.216.34/") == "Could not extract content."
-
-
-def test_read_webpage_retries_once(caplog):
-    with patch("app.llm.web_research.httpx") as mock_httpx, \
-         patch("app.llm.web_research.trafilatura") as mock_traf:
-        mock_httpx.get.side_effect = [RuntimeError("boom"), _resp("<html/>")]
-        mock_traf.extract.return_value = "text"
-        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
-            out = read_webpage("http://93.184.216.34/")
-    assert out == "text"
-    assert any("retrying after error" in r.message for r in caplog.records)
+        assert read_webpage_once("http://93.184.216.34/") == "Could not extract content."
 
 
 @pytest.mark.parametrize(
@@ -149,235 +158,17 @@ def test_read_webpage_retries_once(caplog):
         "file:///etc/passwd",
     ],
 )
-def test_read_webpage_rejects_non_public_urls(url):
+def test_fetch_and_extract_rejects_non_public_urls(url):
     with patch("app.llm.web_research.httpx") as mock_httpx:
         with pytest.raises(ValueError):
-            read_webpage(url)
+            web_research._fetch_and_extract(url)
     mock_httpx.get.assert_not_called()
 
 
-def test_read_webpage_rejects_private_redirect():
+def test_fetch_and_extract_rejects_private_redirect():
     with patch("app.llm.web_research.httpx") as mock_httpx:
         mock_httpx.get.return_value = _redirect("http://127.0.0.1/secret")
         with pytest.raises(ValueError):
-            read_webpage("http://93.184.216.34/")
+            web_research._fetch_and_extract("http://93.184.216.34/")
     fetched = [c.args[0] for c in mock_httpx.get.call_args_list]
     assert all("127.0.0.1" not in u for u in fetched)
-
-
-def _tool_call(name: str, args: dict, call_id: str = "c1") -> AIMessage:
-    return AIMessage(
-        content="",
-        tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
-    )
-
-
-def test_gather_research_no_tool_calls_returns_content(caplog):
-    model = MagicMock()
-    model.invoke.return_value = AIMessage(content="notes")
-    with caplog.at_level(logging.INFO, logger="app.llm.web_research"):
-        out = gather_research(model, [], 4)
-    assert out == "notes"
-    assert any("web research finished" in r.message for r in caplog.records)
-
-
-def test_gather_research_executes_tool_then_returns():
-    model = MagicMock()
-    model.invoke.side_effect = [
-        _tool_call("web_search", {"query": "q"}),
-        AIMessage(content="final notes"),
-    ]
-    with patch("app.llm.web_research.web_search", return_value="RESULT") as mock_search:
-        out = gather_research(model, [], 4)
-    assert out == "final notes"
-    mock_search.assert_called_once_with(query="q")
-
-
-def test_gather_research_tool_error_degrades():
-    model = MagicMock()
-    model.invoke.side_effect = [
-        _tool_call("web_search", {"query": "q"}),
-        AIMessage(content="notes after error"),
-    ]
-    with patch("app.llm.web_research.web_search", side_effect=RuntimeError("ddg down")):
-        out = gather_research(model, [], 4)
-    assert out == "notes after error"
-
-
-def test_gather_research_unknown_tool_degrades():
-    model = MagicMock()
-    model.invoke.side_effect = [
-        _tool_call("nope", {}),
-        AIMessage(content="ok"),
-    ]
-    out = gather_research(model, [], 4)
-    assert out == "ok"
-
-
-def test_gather_research_budget_exhausted_returns_empty(caplog):
-    model = MagicMock()
-    model.invoke.return_value = _tool_call("web_search", {"query": "q"})
-    with patch("app.llm.web_research.web_search", return_value="R"):
-        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
-            out = gather_research(model, [], 2)
-    assert out == ""
-    assert any("yielded no context" in r.message for r in caplog.records)
-
-
-def test_gather_research_tool_budget_caps_executions(caplog):
-    model = MagicMock()
-    model.invoke.side_effect = [
-        AIMessage(
-            content="",
-            tool_calls=[
-                {"name": "web_search", "args": {"query": "a"}, "id": "c1", "type": "tool_call"},
-                {"name": "web_search", "args": {"query": "b"}, "id": "c2", "type": "tool_call"},
-            ],
-        ),
-        AIMessage(content="final notes"),
-    ]
-    with patch("app.llm.web_research.web_search", return_value="R") as mock_search:
-        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
-            out = gather_research(model, [], 4, max_tool_calls=1)
-    assert out == ""
-    assert mock_search.call_count == 1
-    assert any("tool budget exhausted" in r.message for r in caplog.records)
-
-
-def test_gather_research_summarizes_when_round_budget_exhausted():
-    model = MagicMock()
-    model.invoke.return_value = _tool_call("web_search", {"query": "q"})
-    summarizer = MagicMock()
-    summarizer.invoke.return_value = AIMessage(content="SUMMARY NOTES")
-    with patch("app.llm.web_research.web_search", return_value="R"):
-        out = gather_research(model, [], 2, summarizer=summarizer)
-    assert out == "SUMMARY NOTES"
-    summarizer.invoke.assert_called_once()
-
-
-def test_gather_research_summarizes_when_tool_cap_trips():
-    model = MagicMock()
-    model.invoke.return_value = AIMessage(
-        content="",
-        tool_calls=[
-            {"name": "web_search", "args": {"query": "a"}, "id": "c1", "type": "tool_call"},
-            {"name": "web_search", "args": {"query": "b"}, "id": "c2", "type": "tool_call"},
-        ],
-    )
-    summarizer = MagicMock()
-    summarizer.invoke.return_value = AIMessage(content="SUMMARY NOTES")
-    with patch("app.llm.web_research.web_search", return_value="R"):
-        out = gather_research(
-            model, [], 3, max_tool_calls=1, summarizer=summarizer
-        )
-    assert out == "SUMMARY NOTES"
-
-
-def test_gather_research_no_tools_no_summary_when_no_results():
-    model = MagicMock()
-    model.invoke.return_value = AIMessage(content="")
-    summarizer = MagicMock()
-    out = gather_research(model, [], 2, summarizer=summarizer)
-    assert out == ""
-    summarizer.invoke.assert_not_called()
-
-
-def test_gather_research_parallel_preserves_order():
-    import time
-    from langchain_core.messages import ToolMessage
-    model = MagicMock()
-    model.invoke.side_effect = [
-        AIMessage(
-            content="",
-            tool_calls=[
-                {"name": "web_search", "args": {"query": "slow"}, "id": "c1", "type": "tool_call"},
-                {"name": "web_search", "args": {"query": "fast"}, "id": "c2", "type": "tool_call"},
-            ],
-        ),
-        AIMessage(content="done"),
-    ]
-    def fake_search(query: str) -> str:
-        if query == "slow":
-            time.sleep(0.2)
-        return "SLOW" if query == "slow" else "FAST"
-    msgs: list = []
-    with patch("app.llm.web_research.web_search", side_effect=fake_search):
-        out = gather_research(model, msgs, 4)
-    assert out == "done"
-    tools = [m for m in msgs if isinstance(m, ToolMessage)]
-    assert [m.tool_call_id for m in tools] == ["c1", "c2"]
-    assert [m.content for m in tools] == ["SLOW", "FAST"]
-
-
-def test_gather_research_parallel_captures_errors_in_order():
-    from langchain_core.messages import ToolMessage
-    model = MagicMock()
-    model.invoke.side_effect = [
-        AIMessage(
-            content="",
-            tool_calls=[
-                {"name": "web_search", "args": {"query": "ok"}, "id": "c1", "type": "tool_call"},
-                {"name": "web_search", "args": {"query": "boom"}, "id": "c2", "type": "tool_call"},
-                {"name": "nope", "args": {}, "id": "c3", "type": "tool_call"},
-            ],
-        ),
-        AIMessage(content="recovered"),
-    ]
-    def fake_search(query: str) -> str:
-        if query == "boom":
-            raise RuntimeError("ddg down")
-        return "OK"
-    msgs: list = []
-    with patch("app.llm.web_research.web_search", side_effect=fake_search):
-        out = gather_research(model, msgs, 4)
-    assert out == "recovered"
-    tools = [m for m in msgs if isinstance(m, ToolMessage)]
-    assert [m.tool_call_id for m in tools] == ["c1", "c2", "c3"]
-    assert tools[0].content == "OK"
-    assert "something went wrong" in tools[1].content
-    assert "no such tool" in tools[2].content
-
-
-def test_run_web_research_disabled(monkeypatch):
-    monkeypatch.setattr(web_research.settings, "web_search_enabled", False)
-    model = MagicMock()
-    assert run_web_research(model, []) == ""
-    model.bind_tools.assert_not_called()
-
-
-def test_run_web_research_enabled_binds_tools(monkeypatch):
-    monkeypatch.setattr(web_research.settings, "web_search_enabled", True)
-    model = MagicMock()
-    model.bind_tools.return_value.invoke.return_value = AIMessage(content="brief")
-    out = run_web_research(model, [])
-    assert out == "brief"
-    model.bind_tools.assert_called_once()
-
-
-def test_run_web_research_degrades_on_model_failure(monkeypatch, caplog):
-    monkeypatch.setattr(web_research.settings, "web_search_enabled", True)
-    model = MagicMock()
-    with patch(
-        "app.llm.web_research.gather_research", side_effect=RuntimeError("bind boom")
-    ):
-        with caplog.at_level(logging.WARNING, logger="app.llm.web_research"):
-            out = run_web_research(model, [])
-    assert out == ""
-    assert any("web research unavailable" in r.message for r in caplog.records)
-
-
-def test_run_web_research_override_disables_when_flag_on(monkeypatch):
-    from app.config import settings
-    monkeypatch.setattr(settings, "web_search_enabled", True)
-    model = MagicMock()
-    assert run_web_research(model, [], enabled=False) == ""
-
-
-def test_run_web_research_override_forwards_budgets(monkeypatch):
-    model = MagicMock()
-    with patch("app.llm.web_research.gather_research", return_value="notes") as mock_gather:
-        out = run_web_research(model, [], enabled=True, max_rounds=3, max_tool_calls=6)
-
-    assert out == "notes"
-    assert mock_gather.call_args.args[2] == 3
-    assert mock_gather.call_args.args[3] == 6

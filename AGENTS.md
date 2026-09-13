@@ -20,7 +20,8 @@ When pyright surfaces errors: fix ones in files your plan created or touched. Pr
 - Type check: `cd backend && .venv/bin/pyright`
 - Migrations: `cd backend && .venv/bin/alembic revision --autogenerate -m "..."` / `.venv/bin/alembic upgrade head`
 - Infra: `docker compose up -d` (Postgres + Redis + MinIO)
-- Worker (macOS): `SSL_CERT_FILE=$(.venv/bin/python -c "import certifi; print(certifi.where())") .venv/bin/celery -A app.tasks.celery_app worker --loglevel=info` — without this, httpx2 defaults to truststore (macOS Security.framework via ctypes) and prefork children SIGABRT on first LLM TLS call when fork lands mid-ObjC-init; Linux/prod unaffected
+- Worker (macOS): `SSL_CERT_FILE=$(.venv/bin/python -c "import certifi; print(certifi.where())") .venv/bin/celery -A app.tasks.celery_app worker --pool=solo --loglevel=info` — without the certifi override, httpx2 defaults to truststore (macOS Security.framework via ctypes) and prefork children SIGABRT on first LLM TLS call when fork lands mid-ObjC-init; Linux/prod unaffected.
+- Worker (Linux/prod): `celery -A app.tasks.celery_app worker --loglevel=info` (default prefork pool). Concurrency and memory are bounded by config — `celery_worker_concurrency` (child processes), `celery_worker_max_memory_per_child_kb`, `celery_worker_max_tasks_per_child`, `worker_prefetch_multiplier=1` — all in `app/tasks/celery_app.py`. `--pool=solo` (macOS) ignores these limits but still runs a run's unit threads.
 
 ## Conventions
 
