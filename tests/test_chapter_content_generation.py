@@ -255,8 +255,7 @@ def test_streaming_runs_research_once_and_passes_notes_to_sections():
          patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline), \
          patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=section_response) as mock_section, \
          patch("app.agents.chapter_content.generate.generate_chapter_assignment_task"), \
-         patch("app.agents.chapter_content.research.get_chat_model"), \
-         patch("app.agents.chapter_content.research.run_web_research", return_value="NOTES") as mock_research:
+         patch("app.agents.chapter_content.research.fetch_chapter_research", return_value="NOTES") as mock_research:
         list(stream_chapter_content(chapter, db, user_id=1))
 
     mock_research.assert_called_once()
@@ -275,8 +274,7 @@ def test_streaming_still_generates_when_research_fails():
          patch("app.agents.chapter_content.generate.generate_section_outline", return_value=outline), \
          patch("app.agents.chapter_content.generate.generate_chapter_section", return_value=section_response), \
          patch("app.agents.chapter_content.generate.generate_chapter_assignment_task"), \
-         patch("app.agents.chapter_content.research.get_chat_model"), \
-         patch("app.agents.chapter_content.research.run_web_research", side_effect=RuntimeError("down")) as mock_research:
+         patch("app.agents.chapter_content.research.fetch_chapter_research", side_effect=RuntimeError("down")) as mock_research:
         events = list(stream_chapter_content(chapter, db, user_id=1))
 
     mock_research.assert_called_once()

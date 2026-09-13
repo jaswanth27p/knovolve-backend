@@ -25,6 +25,35 @@ def test_settings_defaults_present():
     assert s.chapter_research_enabled is True
     assert s.chapter_research_max_tool_rounds == 3
     assert s.chapter_research_max_tool_calls == 6
+    assert s.chapter_research_top_urls == 3
+    assert s.chapter_research_max_chars_per_page == 4000
+    assert s.chapter_research_max_total_chars == 10000
+
+
+def test_fetch_chapter_research_one_search_top_urls_no_retry():
+    with patch("app.llm.web_research.web_search", return_value=(
+        "T1 | http://a | s\nT2 | http://b | s\nT3 | http://c | s"
+    )) as mock_search, \
+         patch("app.llm.web_research.read_webpage_once", side_effect=lambda u: f"body-{u}") as mock_fetch:
+        out = web_research.fetch_chapter_research(
+            "q", top_urls=2, max_chars_per_page=100, max_total_chars=1000
+        )
+    mock_search.assert_called_once_with("q")
+    assert mock_fetch.call_count == 2
+    assert "URL: http://a" in out and "body-http://a" in out
+    assert "URL: http://b" in out
+    assert "http://c" not in out
+
+
+def test_fetch_chapter_research_empty_when_no_results():
+    with patch("app.llm.web_research.web_search", return_value="No results."):
+        assert web_research.fetch_chapter_research("q") == ""
+
+
+def test_read_webpage_once_does_not_retry():
+    with patch("app.llm.web_research._fetch_and_extract", side_effect=RuntimeError("boom")) as mock_fetch:
+        assert web_research.read_webpage_once("http://x") == "Could not extract content."
+    assert mock_fetch.call_count == 1
 
 
 def _resp(text: str) -> MagicMock:

@@ -112,30 +112,35 @@ def web_search(query: str) -> str:
     return "\n".join(lines) if lines else _NO_RESULTS
 
 
-def read_webpage(url: str) -> str:
-    """Fetch ``url`` and return its extracted main text, truncated."""
-    def _run() -> str:
-        current = url
-        for _ in range(_MAX_REDIRECTS + 1):
-            _assert_public_url(current)
-            resp = httpx.get(
-                current,
-                timeout=settings.web_request_timeout_seconds,
-                follow_redirects=False,
-            )
-            if resp.is_redirect:
-                location = resp.headers.get("location")
-                if not location:
-                    break
-                current = urljoin(current, location)
-                continue
-            resp.raise_for_status()
-            extracted = trafilatura.extract(resp.text) or ""
-            return extracted[: settings.web_page_max_chars]
-        raise ValueError("too many redirects")
+def _fetch_and_extract(url: str) -> str:
+    """Fetch ``url`` (following redirects) and return its extracted main text."""
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        _assert_public_url(current)
+        resp = httpx.get(
+            current,
+            timeout=settings.web_request_timeout_seconds,
+            follow_redirects=False,
+        )
+        if resp.is_redirect:
+            location = resp.headers.get("location")
+            if not location:
+                break
+            current = urljoin(current, location)
+            continue
+        resp.raise_for_status()
+        extracted = trafilatura.extract(resp.text) or ""
+        return extracted[: settings.web_page_max_chars]
+    raise ValueError("too many redirects")
 
+
+def read_webpage(url: str) -> str:
+    """Fetch ``url`` and return its extracted main text, truncated.
+
+    Retries exactly once (course-structure research path).
+    """
     try:
-        text = _retry_once(_run, what="read_webpage")
+        text = _retry_once(lambda: _fetch_and_extract(url), what="read_webpage")
     except Exception as exc:  # noqa: BLE001 - final failure after one retry
         logger.error("read_webpage failed after retry: %s", exc)
         raise
@@ -143,6 +148,75 @@ def read_webpage(url: str) -> str:
     text = text or _NO_CONTENT
     logger.info("read_webpage url=%s chars=%d", url, len(text))
     return text
+
+
+def read_webpage_once(url: str) -> str:
+    """Fetch ``url`` once (no retry); returns ``_NO_CONTENT`` on any failure.
+
+    Used by the deterministic chapter-research pass, which must not add
+    retry latency to the streaming chapter path.
+    """
+    try:
+        text = _fetch_and_extract(url)
+    except Exception as exc:  # noqa: BLE001 - best-effort single attempt
+        logger.warning("read_webpage_once failed url=%s: %s", url, exc)
+        return _NO_CONTENT
+    return text or _NO_CONTENT
+
+
+def _search_targets(search_output: str, limit: int) -> list[tuple[str, str]]:
+    """Parse ``web_search`` lines into (title, url) pairs, capped at ``limit``."""
+    targets: list[tuple[str, str]] = []
+    for line in search_output.splitlines():
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) >= 2 and parts[1].startswith("http"):
+            targets.append((parts[0], parts[1]))
+        if len(targets) >= limit:
+            break
+    return targets
+
+
+def fetch_chapter_research(
+    query: str,
+    *,
+    top_urls: int = 3,
+    max_chars_per_page: int = 4000,
+    max_total_chars: int = 10000,
+) -> str:
+    """Deterministic one-shot chapter research.
+
+    One ``web_search`` → fetch the top ``top_urls`` results once (no retry) in
+    parallel → concatenate the extracted text as research notes. No agent tool
+    loop, no round budget, no summarizer model call. Returns ``""`` when
+    nothing usable was gathered, so callers degrade to no notes.
+    """
+    try:
+        search_output = web_search(query)
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        logger.warning("chapter research search failed: %s", exc)
+        return ""
+    if not search_output or search_output == _NO_RESULTS:
+        return ""
+
+    targets = _search_targets(search_output, top_urls)
+    if not targets:
+        return ""
+
+    with ThreadPoolExecutor(max_workers=min(len(targets), 4)) as pool:
+        texts = list(pool.map(lambda target: read_webpage_once(target[1]), targets))
+
+    blocks: list[str] = []
+    for (title, url), text in zip(targets, texts):
+        if not text or text == _NO_CONTENT:
+            continue
+        blocks.append(f"Source: {title}\nURL: {url}\n{text[:max_chars_per_page]}")
+
+    notes = "\n\n".join(blocks)[:max_total_chars].strip()
+    logger.info(
+        "chapter research one-shot query=%s urls=%d blocks=%d notes_chars=%d",
+        query, len(targets), len(blocks), len(notes),
+    )
+    return notes
 
 
 def build_web_tools() -> list[BaseTool]:

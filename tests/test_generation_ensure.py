@@ -318,8 +318,7 @@ def test_ensure_chapter_content_runs_research_and_passes_notes():
         assert chapter is not None
         with patch("app.agents.generation.ensure.generate_section_outline", return_value=outline), \
             patch("app.agents.generation.ensure.generate_chapter_section", return_value=section_result) as mock_section, \
-            patch("app.agents.chapter_content.research.get_chat_model"), \
-            patch("app.agents.chapter_content.research.run_web_research", return_value="NOTES") as mock_research:
+            patch("app.agents.chapter_content.research.fetch_chapter_research", return_value="NOTES") as mock_research:
             ensure_module.ensure_chapter_content(db, chapter)
 
         mock_research.assert_called_once()

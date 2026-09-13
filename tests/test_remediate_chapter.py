@@ -171,15 +171,13 @@ def test_remediation_runs_research_with_weak_concepts_and_passes_notes():
     with patch("app.agents.chapter_content.remediate.generate_remediation_outline", return_value=_OUTLINE), \
          patch("app.agents.chapter_content.remediate.generate_chapter_section", return_value=_SECTION_RESPONSE) as mock_section, \
          patch("app.agents.chapter_content.remediate.generate_chapter_assignment_task"), \
-         patch("app.agents.chapter_content.research.get_chat_model"), \
-         patch("app.agents.chapter_content.research.run_web_research", return_value="NOTES") as mock_research:
+         patch("app.agents.chapter_content.research.fetch_chapter_research", return_value="NOTES") as mock_research:
         with SessionLocal() as db:
             remediate_chapter(chapter_id, user_id, ["recursion-base-case"], attempt_id, db)
 
     mock_research.assert_called_once()
-    research_messages = mock_research.call_args.args[1]
-    research_blob = "\n".join(m.content for m in research_messages)
-    assert "recursion-base-case" in research_blob
+    research_query = mock_research.call_args.args[0]
+    assert "recursion-base-case" in research_query
     assert mock_section.call_args.args[5] == "NOTES"
     with SessionLocal() as db:
         content = db.query(ChapterContent).filter_by(

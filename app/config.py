@@ -68,9 +68,21 @@ class Settings(BaseSettings):
     # web_search_enabled (which gates course-structure research) because
     # chapter content streams to a waiting learner, so its latency/cost must
     # be tunable on its own.
+    #
+    # Chapter research is a single deterministic pass (no agent tool loop):
+    # one search, fetch the top `chapter_research_top_urls` results once, and
+    # hand the extracted text to the section writers. The legacy round/call
+    # budgets are kept for config compatibility but are no longer used.
     chapter_research_enabled: bool = True
     chapter_research_max_tool_rounds: int = 3
     chapter_research_max_tool_calls: int = 6
+    chapter_research_top_urls: int = 3
+    chapter_research_max_chars_per_page: int = 4000
+    chapter_research_max_total_chars: int = 10000
+    # Section bodies are written by independent LLM calls; run up to this many
+    # concurrently so a chapter's wall-clock time is roughly
+    # ceil(sections / workers) rather than sections * latency.
+    chapter_section_max_workers: int = 4
     web_request_timeout_seconds: float = 15.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.

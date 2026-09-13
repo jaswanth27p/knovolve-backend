@@ -9,6 +9,7 @@ the same chapter) replays what's already persisted and only generates
 what's missing, driven by the SAME persisted outline every time.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Iterator
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.agents.chapter_content.nodes.generate_section_outline import generate_section_outline
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
 from app.agents.chapter_content.research import ensure_chapter_research
+from app.config import settings
 from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
@@ -155,53 +157,68 @@ def stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Itera
     ensure_chapter_research(db, chapter, content)
 
     done_orders = {s.order for s in existing}
-    for i, entry in enumerate(content.outline):
-        if i in done_orders:
-            continue
+    pending = [(i, entry) for i, entry in enumerate(content.outline) if i not in done_orders]
+    if pending:
+        # Section bodies are independent LLM calls, so fan them out. The LLM
+        # calls run in worker threads; every DB read/write stays on this thread
+        # (SQLAlchemy sessions are not thread-safe). Events are emitted in
+        # completion order — the client keys sections by `order` and sorts.
+        max_workers = max(1, min(settings.chapter_section_max_workers, len(pending)))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {
+            executor.submit(
+                generate_chapter_section,
+                chapter.title, chapter.objective, entry["heading"], entry["objective"],
+                entry["kind"], content.research_notes or FALLBACK_RESEARCH_NOTES,
+            ): (i, entry)
+            for i, entry in pending
+        }
         try:
-            result = generate_chapter_section(
-                chapter.title, chapter.objective, entry["heading"], entry["objective"], entry["kind"],
-                content.research_notes or FALLBACK_RESEARCH_NOTES,
-            )
-        except Exception as exc:
-            content.status = "failed"
-            content.error = str(exc)
-            content.updated_at = datetime.now(timezone.utc)
-            db.commit()
-            yield {"type": "error", "message": str(exc)}
-            return
+            for future in as_completed(futures):
+                i, entry = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    content.status = "failed"
+                    content.error = str(exc)
+                    content.updated_at = datetime.now(timezone.utc)
+                    db.commit()
+                    yield {"type": "error", "message": str(exc)}
+                    return
 
-        diagram_spec = result.diagram_spec
-        section = ChapterContentSection(
-            chapter_content_id=content.id, order=i, heading=entry["heading"], kind=entry["kind"],
-            body_markdown=result.body_markdown,
-            examples=[e.model_dump() for e in result.examples],
-            diagram_spec=diagram_spec.model_dump() if diagram_spec is not None else None,
-            diagram_status="pending" if diagram_spec is not None else None,
-        )
-        db.add(section)
-        try:
-            db.commit()
-        except IntegrityError:
-            # A concurrent open of the same chapter generated and persisted this
-            # exact section first (unique (chapter_content_id, order)). Adopt the
-            # winner's row — don't re-generate or re-dispatch its diagram — and
-            # resume from here.
-            db.rollback()
-            section = db.scalar(
-                select(ChapterContentSection).where(
-                    ChapterContentSection.chapter_content_id == content.id,
-                    ChapterContentSection.order == i,
+                diagram_spec = result.diagram_spec
+                section = ChapterContentSection(
+                    chapter_content_id=content.id, order=i, heading=entry["heading"], kind=entry["kind"],
+                    body_markdown=result.body_markdown,
+                    examples=[e.model_dump() for e in result.examples],
+                    diagram_spec=diagram_spec.model_dump() if diagram_spec is not None else None,
+                    diagram_status="pending" if diagram_spec is not None else None,
                 )
-            )
-            if section is None:
-                raise
-        else:
-            db.refresh(section)
-            if diagram_spec is not None:
-                render_diagram_task.delay(section.id)  # pyright: ignore[reportFunctionMemberAccess]
+                db.add(section)
+                try:
+                    db.commit()
+                except IntegrityError:
+                    # A concurrent open of the same chapter generated and persisted this
+                    # exact section first (unique (chapter_content_id, order)). Adopt the
+                    # winner's row — don't re-generate or re-dispatch its diagram — and
+                    # resume from here.
+                    db.rollback()
+                    section = db.scalar(
+                        select(ChapterContentSection).where(
+                            ChapterContentSection.chapter_content_id == content.id,
+                            ChapterContentSection.order == i,
+                        )
+                    )
+                    if section is None:
+                        raise
+                else:
+                    db.refresh(section)
+                    if diagram_spec is not None:
+                        render_diagram_task.delay(section.id)  # pyright: ignore[reportFunctionMemberAccess]
 
-        yield _section_event(section)
+                yield _section_event(section)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # Re-check against the DB before flipping to "ready". Under a concurrent
     # double-open both generators loop over the same outline; this generator may

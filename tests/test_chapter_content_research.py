@@ -39,14 +39,12 @@ def test_persists_notes_and_seeds_prompt_from_outline_and_tags():
         chapter, content = _make_chapter_with_content(
             db, "cc-research-persist", _OUTLINE, tags=["recursion-base-case"]
         )
-        with patch("app.agents.chapter_content.research.get_chat_model"), \
-             patch("app.agents.chapter_content.research.run_web_research", return_value="FACT | http://src") as mock_research:
+        with patch("app.agents.chapter_content.research.fetch_chapter_research", return_value="FACT | http://src") as mock_research:
             research_module.ensure_chapter_research(db, chapter, content)
 
-        messages = mock_research.call_args.args[1]
-        blob = "\n".join(m.content for m in messages)
-        assert "- Base cases" in blob
-        assert "recursion-base-case" in blob
+        query = mock_research.call_args.args[0]
+        assert "Recursion" in query
+        assert "recursion-base-case" in query
         db.refresh(content)
         assert content.research_notes == "FACT | http://src"
 
@@ -55,7 +53,7 @@ def test_noop_when_disabled(monkeypatch):
     monkeypatch.setattr(settings, "chapter_research_enabled", False)
     with SessionLocal() as db:
         chapter, content = _make_chapter_with_content(db, "cc-research-disabled", _OUTLINE)
-        with patch("app.agents.chapter_content.research.run_web_research") as mock_research:
+        with patch("app.agents.chapter_content.research.fetch_chapter_research") as mock_research:
             research_module.ensure_chapter_research(db, chapter, content)
         mock_research.assert_not_called()
         db.refresh(content)
@@ -67,7 +65,7 @@ def test_noop_when_notes_already_present():
         chapter, content = _make_chapter_with_content(
             db, "cc-research-present", _OUTLINE, notes="already"
         )
-        with patch("app.agents.chapter_content.research.run_web_research") as mock_research:
+        with patch("app.agents.chapter_content.research.fetch_chapter_research") as mock_research:
             research_module.ensure_chapter_research(db, chapter, content)
         mock_research.assert_not_called()
 
@@ -75,7 +73,7 @@ def test_noop_when_notes_already_present():
 def test_noop_when_outline_empty():
     with SessionLocal() as db:
         chapter, content = _make_chapter_with_content(db, "cc-research-no-outline", [])
-        with patch("app.agents.chapter_content.research.run_web_research") as mock_research:
+        with patch("app.agents.chapter_content.research.fetch_chapter_research") as mock_research:
             research_module.ensure_chapter_research(db, chapter, content)
         mock_research.assert_not_called()
 
@@ -83,8 +81,7 @@ def test_noop_when_outline_empty():
 def test_empty_result_leaves_notes_none():
     with SessionLocal() as db:
         chapter, content = _make_chapter_with_content(db, "cc-research-empty", _OUTLINE)
-        with patch("app.agents.chapter_content.research.get_chat_model"), \
-             patch("app.agents.chapter_content.research.run_web_research", return_value=""):
+        with patch("app.agents.chapter_content.research.fetch_chapter_research", return_value=""):
             research_module.ensure_chapter_research(db, chapter, content)
         db.refresh(content)
         assert content.research_notes is None
@@ -93,8 +90,7 @@ def test_empty_result_leaves_notes_none():
 def test_research_failure_is_swallowed():
     with SessionLocal() as db:
         chapter, content = _make_chapter_with_content(db, "cc-research-fail", _OUTLINE)
-        with patch("app.agents.chapter_content.research.get_chat_model"), \
-             patch("app.agents.chapter_content.research.run_web_research", side_effect=RuntimeError("down")):
+        with patch("app.agents.chapter_content.research.fetch_chapter_research", side_effect=RuntimeError("down")):
             research_module.ensure_chapter_research(db, chapter, content)  # must not raise
         db.refresh(content)
         assert content.research_notes is None
