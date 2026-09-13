@@ -650,7 +650,13 @@ CHAT_AGENT_SYSTEM_PROMPT = ChatPromptTemplate.from_messages(
             "through.\n\n"
             "Learner context (coarse -- call a tool for anything deeper or "
             "more current):\n{bundle_json}\n\n"
-            "Learner's current location in the app:\n{route_json}",
+            "Learner's current location in the app:\n{route_json}\n\n"
+            "When the learner says \"this chapter\", \"this course\", \"this "
+            "assignment\", or \"my last attempt\", resolve it from "
+            "`current_route` (course_slug / chapter_id / assignment_id / "
+            "attempt_id) and call the matching tool directly. Do not ask the "
+            "learner to name the chapter or assignment they are already "
+            "looking at.",
         ),
     ]
 )

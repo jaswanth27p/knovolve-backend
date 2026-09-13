@@ -8,7 +8,7 @@ import logging
 from typing import Iterator
 
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolCall, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from sqlalchemy.orm import Session
@@ -50,17 +50,37 @@ def _history_to_messages(history: list[ChatTurn]) -> list[BaseMessage]:
     ]
 
 
+def _execute_tool_call(tools_by_name: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
+    """Turn one model tool call into a model-facing ToolMessage. Every failure
+    is caught and returned as text so a bad/hallucinated call can't 500 the
+    request (or truncate an already-started stream)."""
+    tool_fn = tools_by_name.get(call["name"])
+    if tool_fn is None:
+        # The model asked for a tool that isn't bound (hallucinated or
+        # renamed). Tell it so it can recover instead of 500-ing.
+        result = f"Error: no such tool '{call['name']}'."
+    else:
+        try:
+            result = tool_fn.invoke(call["args"])
+        except ChatToolError as exc:
+            # ChatToolError messages are written to be model-facing.
+            result = f"Error: {exc}"
+        except Exception:  # noqa: BLE001 - bad/hallucinated args (pydantic
+            # ValidationError) or any runtime/DB failure inside a tool must
+            # not 500 the request; the model gets a chance to recover.
+            logger.warning("chat tool %r failed", call["name"], exc_info=True)
+            result = "Error: something went wrong calling this tool."
+    return ToolMessage(content=str(result), tool_call_id=call["id"])
+
+
 def _run_tool_rounds(
     tools_by_name: dict[str, BaseTool], model: BoundModel, messages: list[BaseMessage],
 ) -> AIMessage | None:
     """Mutates `messages` in place, executing tool-call rounds until the model
     responds with no tool_calls, and returns that final response (which is
     deliberately NOT appended to `messages`). Returns None if MAX_TOOL_ROUNDS
-    was hit while the model was still asking for tools.
-
-    The buffered final response is what the non-streaming caller replies with;
-    the streaming caller throws it away and re-runs the same `messages`
-    through `.stream()` so the reply arrives token-by-token."""
+    was hit while the model was still asking for tools. Used only by the
+    non-streaming `answer_chat_message`."""
     for _ in range(MAX_TOOL_ROUNDS):
         resp = call_with_retry(model.invoke, messages)
         assert isinstance(resp, AIMessage)
@@ -68,23 +88,7 @@ def _run_tool_rounds(
             return resp
         messages.append(resp)
         for call in resp.tool_calls:
-            tool_fn = tools_by_name.get(call["name"])
-            if tool_fn is None:
-                # The model asked for a tool that isn't bound (hallucinated or
-                # renamed). Tell it so it can recover instead of 500-ing.
-                result = f"Error: no such tool '{call['name']}'."
-            else:
-                try:
-                    result = tool_fn.invoke(call["args"])
-                except ChatToolError as exc:
-                    # ChatToolError messages are written to be model-facing.
-                    result = f"Error: {exc}"
-                except Exception:  # noqa: BLE001 - bad/hallucinated args (pydantic
-                    # ValidationError) or any runtime/DB failure inside a tool must
-                    # not 500 the request; the model gets a chance to recover.
-                    logger.warning("chat tool %r failed", call["name"], exc_info=True)
-                    result = "Error: something went wrong calling this tool."
-            messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+            messages.append(_execute_tool_call(tools_by_name, call))
     return None
 
 
@@ -118,6 +122,12 @@ def answer_chat_message(db: Session, user_id: int, req: ChatRequest) -> ChatResp
 
 
 def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator[dict]:
+    # Streaming-first: the model's first response is streamed straight to the
+    # client. Only if that response actually asks for tools do we run a round
+    # and stream again. The old code buffered a full non-streaming answer here
+    # (`_build_agent` -> `_run_tool_rounds`) and then discarded it to re-run
+    # `model.stream`, generating every simple reply twice (~2x latency).
+    #
     # Everything that can fail lives inside the try: the response has already
     # started streaming once we yield, so any failure from here on has to reach
     # the client as an `error` event, not escape the generator and truncate the
@@ -127,21 +137,41 @@ def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator
         if req.context is None:
             yield {"type": "context", "bundle": bundle.model_dump(mode="json")}
 
-        model, messages, final = _build_agent(db, user_id, req, bundle)
+        tools = build_tools(db, user_id)
+        tools_by_name = {t.name: t for t in tools}
+        base_model = get_chat_model("chat_reply")
+        model = base_model.bind_tools(tools)
+        route_json = req.current_route.model_dump_json() if req.current_route is not None else "unknown"
+        system = CHAT_AGENT_SYSTEM_PROMPT.format_messages(
+            bundle_json=bundle.model_dump_json(), route_json=route_json,
+        )
+        messages: list[BaseMessage] = [
+            *system, *_history_to_messages(req.history), HumanMessage(content=req.message),
+        ]
+
         yielded_any = False
-        for chunk in model.stream(messages):
-            content = chunk.content
-            if isinstance(content, str) and content:
-                yielded_any = True
-                yield {"type": "token", "text": content}
+        for _ in range(MAX_TOOL_ROUNDS):
+            aggregated: AIMessageChunk | None = None
+            for chunk in model.stream(messages):
+                if isinstance(chunk, AIMessageChunk):
+                    aggregated = chunk if aggregated is None else aggregated + chunk
+                content = chunk.content
+                if isinstance(content, str) and content:
+                    yielded_any = True
+                    yield {"type": "token", "text": content}
+            if aggregated is None or not aggregated.tool_calls:
+                break
+            messages.append(aggregated)
+            for call in aggregated.tool_calls:
+                messages.append(_execute_tool_call(tools_by_name, call))
+
         if not yielded_any:
-            # The streaming call is a fresh generation and can come back empty
-            # (or decide to call a tool); prefer the already-buffered tool-free
-            # answer over the generic placeholder.
-            if final is not None and isinstance(final.content, str) and final.content.strip():
-                yield {"type": "token", "text": final.content}
-            else:
-                yield {"type": "token", "text": FALLBACK_REPLY}
+            # The model streamed no text at all (it may have gone straight to
+            # tools every round, or come back empty). Force one tool-free
+            # answer rather than leaving the learner with a blank reply.
+            resp = call_with_retry(base_model.invoke, messages)
+            content = resp.content if isinstance(resp.content, str) else ""
+            yield {"type": "token", "text": content.strip() or FALLBACK_REPLY}
     except Exception:  # noqa: BLE001 - surfaced to the client as a chat error, not a 500
         yield {"type": "error", "message": "Failed to generate a reply. Please try again."}
         return

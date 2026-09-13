@@ -95,6 +95,58 @@ def test_stream_yields_context_event_on_first_turn_only(monkeypatch):
     assert events[-1] == {"type": "done"}
 
 
+def test_stream_no_tool_reply_generates_once(monkeypatch):
+    """A simple question must not be generated twice: the old code buffered a
+    full non-streaming answer (model.invoke) and then re-generated it via
+    model.stream. Streaming-first means only model.stream is called."""
+    from langchain_core.messages import AIMessageChunk
+
+    model = MagicMock()
+    model.bind_tools.return_value = model
+    model.stream.return_value = [AIMessageChunk(content="Hello "), AIMessageChunk(content="world")]
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [])
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="hi")))
+
+    tokens = [e["text"] for e in events if e["type"] == "token"]
+    assert "".join(tokens) == "Hello world"
+    assert model.invoke.call_count == 0
+    assert model.stream.call_count == 1
+
+
+def test_stream_executes_tool_call_then_streams_final_reply(monkeypatch):
+    """A tool-calling first streamed round must run the tool, then stream a
+    second round for the final answer."""
+    from langchain_core.messages import AIMessageChunk
+
+    tool_call_chunk = AIMessageChunk(
+        content="",
+        tool_call_chunks=[{"name": "get_user_stats", "args": "{}", "id": "call-1", "index": 0}],
+    )
+    model = MagicMock()
+    model.bind_tools.return_value = model
+    model.stream.side_effect = [
+        [tool_call_chunk],
+        [AIMessageChunk(content="You've done 1 today.")],
+    ]
+
+    fake_tool = MagicMock()
+    fake_tool.name = "get_user_stats"
+    fake_tool.invoke.return_value = {"assignments_attempted_today": 1}
+
+    monkeypatch.setattr("app.services.chat.get_chat_model", lambda node: model)
+    monkeypatch.setattr("app.services.chat.build_tools", lambda db, user_id: [fake_tool])
+
+    with SessionLocal() as db:
+        events = list(chat.stream_chat_message(db, user_id=1, req=ChatRequest(message="stats?")))
+
+    fake_tool.invoke.assert_called_once()
+    assert events[-2] == {"type": "token", "text": "You've done 1 today."}
+    assert events[-1] == {"type": "done"}
+
+
 def test_stream_omits_context_event_when_request_already_has_one(monkeypatch):
     final = AIMessage(content="ok again")
     model = _bound_model([final])
