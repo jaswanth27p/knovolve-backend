@@ -89,22 +89,27 @@ def test_invalid_json_triggers_one_corrective_reinvoke():
     assert model.bind_tools.return_value.invoke.call_count == 2
 
 
-def test_tool_loop_budget_hit_raises():
+def test_tool_loop_budget_exhausted_forces_final_json():
+    """A model that keeps calling the read tool must not abort the job — the
+    agent forces one tool-free generation and parses that as the plan instead."""
     course = _make_course()
-    # The model never stops asking for tools, so it is invoked once per round
-    # until the budget is exhausted; provide one response per round.
-    model = _make_model(*[AIMessage(content="", tool_calls=[{
-        "name": "read_chapter_content", "args": {}, "id": "call_x", "type": "tool_call",
-    }])] * MAX_TOOL_ROUNDS)
+    model = MagicMock()
+    model.bind_tools.return_value.invoke = MagicMock(side_effect=[
+        AIMessage(content="", tool_calls=[{
+            "name": "read_chapter_content", "args": {}, "id": f"call_{i}", "type": "tool_call",
+        }])
+        for i in range(MAX_TOOL_ROUNDS)
+    ])
+    model.invoke = MagicMock(return_value=AIMessage(content=json.dumps({"chapters": [
+        {"title": "Z", "objective": "o"},
+    ]})))
     with patch("app.agents.course_extension.agent.get_chat_model", return_value=model), \
          patch("app.services.chat_tools.chapters.get_chapter_content",
                return_value={"available": False}):
         with SessionLocal() as db:
-            try:
-                plan_new_chapters(db, course, 5, "spam")
-                raise AssertionError("expected ValueError")
-            except ValueError:
-                pass
+            result = plan_new_chapters(db, course, 5, "spam")
+    assert result == [{"title": "Z", "objective": "o"}]
+    model.invoke.assert_called_once()
 
 
 def test_outline_includes_global_and_user_bucket():

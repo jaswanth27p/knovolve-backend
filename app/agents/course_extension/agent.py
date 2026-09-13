@@ -69,7 +69,7 @@ def _build_tool(db: Session, course: Course, user_id: int):
     return read_chapter_content
 
 
-def _parse_chapters(resp: AIMessage, model, messages: list[BaseMessage]) -> list[dict]:
+def _parse_chapters(resp: AIMessage, invoke_fn, messages: list[BaseMessage]) -> list[dict]:
     for _ in range(MAX_PARSE_ATTEMPTS):
         content = resp.content
         if isinstance(content, str):
@@ -83,24 +83,25 @@ def _parse_chapters(resp: AIMessage, model, messages: list[BaseMessage]) -> list
             content="Your previous reply was not valid JSON matching the required schema. "
                     "Reply with the JSON object only."
         ))
-        resp = call_with_retry(model.invoke, messages)
+        resp = call_with_retry(invoke_fn, messages)
         assert isinstance(resp, AIMessage)
     raise ValueError("extension plan produced invalid JSON after corrective retries")
 
 
 def plan_new_chapters(db: Session, course: Course, user_id: int, request_text: str) -> list[dict]:
     read_tool = _build_tool(db, course, user_id)
-    model = get_chat_model("extension_plan").bind_tools([read_tool])
+    model = get_chat_model("extension_plan")
+    bound = model.bind_tools([read_tool])
     messages: list[BaseMessage] = [
         *EXTENSION_PLAN_PROMPT.format_messages(
             outline_json=_outline_json(db, course, user_id), request=request_text,
         ),
     ]
     for _ in range(MAX_TOOL_ROUNDS):
-        resp = call_with_retry(model.invoke, messages)
+        resp = call_with_retry(bound.invoke, messages)
         assert isinstance(resp, AIMessage)
         if not resp.tool_calls:
-            return _parse_chapters(resp, model, messages)
+            return _parse_chapters(resp, bound.invoke, messages)
         messages.append(resp)
         for call in resp.tool_calls:
             if call["name"] == "read_chapter_content":
@@ -112,4 +113,14 @@ def plan_new_chapters(db: Session, course: Course, user_id: int, request_text: s
             else:
                 result = f"Error: no such tool '{call['name']}'."
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
-    raise ValueError("extension plan exceeded tool round budget")
+    # The model burned the whole tool budget without converging on a final
+    # JSON answer (a real failure mode: it keeps re-reading chapter content).
+    # Don't abort the learner's job — force one tool-free generation and parse
+    # that. Seeding the same messages keeps all the outline/tool context.
+    messages.append(HumanMessage(
+        content="Tool budget exhausted. Output the final JSON object only, no prose, "
+                'matching {"chapters": [{"title": "...", "objective": "..."}]}.'
+    ))
+    final = call_with_retry(model.invoke, messages)
+    assert isinstance(final, AIMessage)
+    return _parse_chapters(final, model.invoke, messages)
