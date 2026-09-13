@@ -78,6 +78,36 @@ def create_extension_job(db: Session, user_id: int, course: Course, message: str
     return job
 
 
+def list_extension_jobs(db: Session, user_id: int, course: Course, limit: int = 10) -> list[CourseExtensionJob]:
+    """This user's extension jobs for `course`, newest first. DB-backed so the
+    extend page can re-attach to anything still in flight after a reload or a
+    logout/login, mirroring the learn page's persisted course-job list."""
+    return list(db.scalars(
+        select(CourseExtensionJob)
+        .where(
+            CourseExtensionJob.course_id == course.id,
+            CourseExtensionJob.user_id == user_id,
+        )
+        .order_by(CourseExtensionJob.id.desc())
+        .limit(limit)
+    ).all())
+
+
+def get_latest_extension_job(db: Session, user_id: int, course: Course) -> CourseExtensionJob | None:
+    """This user's most recent extension job for `course`, whatever its status.
+    Lets the extend page re-attach to an in-flight job after navigation (the
+    active-job partial unique index guarantees at most one running at a time)."""
+    return db.scalar(
+        select(CourseExtensionJob)
+        .where(
+            CourseExtensionJob.course_id == course.id,
+            CourseExtensionJob.user_id == user_id,
+        )
+        .order_by(CourseExtensionJob.id.desc())
+        .limit(1)
+    )
+
+
 def get_extension_job(db: Session, user_id: int, course: Course, job_id: int) -> CourseExtensionJob:
     job = db.scalar(
         select(CourseExtensionJob).where(

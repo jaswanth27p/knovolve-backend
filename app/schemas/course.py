@@ -141,6 +141,11 @@ class ExtensionJobResponse(BaseModel):
     job_id: int | None = None
     error: str | None = None
     added: list[ExtensionChapterResult] | None = None
+    # Enough to render a "jobs in progress" list so a learner can see a
+    # running/queued request and not mistake it for having finished.
+    request: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class ExtensionChapterSummary(BaseModel):

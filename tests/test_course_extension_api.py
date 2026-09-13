@@ -78,6 +78,63 @@ def test_create_poll_list_delete_flow():
     assert resp.json() == []
 
 
+def test_list_jobs_returns_recent_first():
+    headers = _auth_headers()
+    _make_course()
+    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+        first = client.post("/courses/ext-api-course/extensions",
+                            json={"message": "first"}, headers=headers).json()["job_id"]
+
+    from app.db import SessionLocal as S
+    from app.models.course_extension import CourseExtensionJob as J
+    with S() as db:
+        job = db.get(J, first)
+        assert job is not None
+        job.status = "succeeded"
+        job.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+        second = client.post("/courses/ext-api-course/extensions",
+                             json={"message": "second"}, headers=headers).json()["job_id"]
+
+    resp = client.get("/courses/ext-api-course/extensions/jobs", headers=headers)
+    assert resp.status_code == 200
+    assert [j["job_id"] for j in resp.json()] == [second, first]
+
+
+def test_list_jobs_empty_when_never_extended():
+    headers = _auth_headers()
+    _make_course()
+    resp = client.get("/courses/ext-api-course/extensions/jobs", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_latest_job_survives_navigation():
+    """The extend page reads this on mount so an in-flight job isn't lost when
+    the learner navigates away and back."""
+    headers = _auth_headers()
+    _make_course()
+    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+        resp = client.post("/courses/ext-api-course/extensions",
+                           json={"message": "add tcp"}, headers=headers)
+    job_id = resp.json()["job_id"]
+
+    latest = client.get("/courses/ext-api-course/extensions/jobs/latest", headers=headers)
+    assert latest.status_code == 200
+    assert latest.json()["job_id"] == job_id
+    assert latest.json()["status"] == "pending"
+
+
+def test_latest_job_none_when_never_extended():
+    headers = _auth_headers()
+    _make_course()
+    latest = client.get("/courses/ext-api-course/extensions/jobs/latest", headers=headers)
+    assert latest.status_code == 200
+    assert latest.json() is None
+
+
 def test_concurrent_run_rejected():
     headers = _auth_headers()
     _make_course()

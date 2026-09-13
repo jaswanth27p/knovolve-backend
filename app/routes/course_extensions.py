@@ -21,7 +21,34 @@ def create_extension(slug: str, body: CreateExtensionRequest, response: Response
     course = courses.get_course_by_slug(db, slug)
     job = course_extension.create_extension_job(db, user.id, course, body.message)
     run_course_extension_job.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
-    return ExtensionJobResponse(status=job.status, job_id=job.id)
+    return ExtensionJobResponse(status=job.status, job_id=job.id, request=job.request,
+                                created_at=job.created_at, updated_at=job.updated_at)
+
+
+@router.get("/jobs", response_model=list[ExtensionJobResponse])
+def list_extension_jobs(slug: str, db: Session = Depends(get_session),
+                        user: User = Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    return [
+        ExtensionJobResponse(
+            status=job.status, job_id=job.id, error=job.error, added=job.result,
+            request=job.request, created_at=job.created_at, updated_at=job.updated_at,
+        )
+        for job in course_extension.list_extension_jobs(db, user.id, course)
+    ]
+
+
+@router.get("/jobs/latest", response_model=ExtensionJobResponse | None)
+def get_latest_extension_job(slug: str, db: Session = Depends(get_session),
+                             user: User = Depends(get_current_user)):
+    course = courses.get_course_by_slug(db, slug)
+    job = course_extension.get_latest_extension_job(db, user.id, course)
+    if job is None:
+        return None
+    return ExtensionJobResponse(
+        status=job.status, job_id=job.id, error=job.error, added=job.result,
+        request=job.request, created_at=job.created_at, updated_at=job.updated_at,
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=ExtensionJobResponse)
@@ -31,6 +58,7 @@ def get_extension_job(slug: str, job_id: int, db: Session = Depends(get_session)
     job = course_extension.get_extension_job(db, user.id, course, job_id)
     return ExtensionJobResponse(
         status=job.status, job_id=job.id, error=job.error, added=job.result,
+        request=job.request, created_at=job.created_at, updated_at=job.updated_at,
     )
 
 
