@@ -38,3 +38,30 @@ def test_mcq_question_requires_options_not_none():
     with pytest.raises(ValidationError):
         QuestionDraft(type="mcq", text="q", options=None, correct_answer="a",
                       explanation="e", concept_tag="t", difficulty="easy")
+
+
+def test_mcq_correct_answer_repaired_to_matching_option():
+    # The model returned a paraphrase of an option rather than the verbatim
+    # option text — grading compares exact strings, so it must be repaired.
+    q = QuestionDraft(
+        type="mcq", text="q",
+        options=["It is a peninsula", "It is a plateau", "It is a desert"],
+        correct_answer="The correct answer is that it is a peninsula with water barriers.",
+        explanation="e", concept_tag="t", difficulty="easy",
+    )
+    assert q.options is not None and q.correct_answer in q.options
+    assert q.correct_answer == "It is a peninsula"
+
+
+def test_mcq_correct_answer_normalizes_case_and_whitespace():
+    q = QuestionDraft(
+        type="mcq", text="q", options=["Alpha", "Beta"],
+        correct_answer="  alpha  ", explanation="e", concept_tag="t", difficulty="easy",
+    )
+    assert q.correct_answer == "Alpha"
+
+
+def test_true_false_correct_answer_normalized_to_lowercase():
+    q = QuestionDraft(type="true_false", text="q", options=None, correct_answer="True",
+                      explanation="e", concept_tag="t", difficulty="easy")
+    assert q.correct_answer == "true"
