@@ -23,9 +23,10 @@ def test_post_courses_enqueues_job():
     assert resp.json()["status"] == "pending"
     mock_delay.assert_called_once()
 
-def test_post_courses_preview_surfaces_inflight_job_as_candidate():
-    """A pending/running job matching the topic must appear as a candidate
-    rather than auto-attaching — the user decides."""
+def test_post_courses_exact_inflight_job_attaches_not_candidate():
+    """An exact canonical-slug match against an in-flight job attaches to that
+    job (pending) instead of being offered as a candidate: it's the same topic,
+    not merely a similar one. Similar-but-not-identical topics still preview."""
     headers = _auth_headers()
     from datetime import datetime, timezone
     from app.db import SessionLocal
@@ -44,14 +45,10 @@ def test_post_courses_preview_surfaces_inflight_job_as_candidate():
          patch("app.services.courses.embed", return_value=[0.95] + [0.0] * 2047), \
          patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
         resp = client.post("/courses", json={"topic": "haskell"}, headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     body = resp.json()
-    assert body["status"] == "similar"
-    assert body["search_token"]
-    assert len(body["candidates"]) == 1
-    assert body["candidates"][0]["id"] == job_id
-    assert body["candidates"][0]["status"] == "running"
-    assert body["candidates"][0]["course_url"] is None
+    assert body["status"] == "pending"
+    assert body["job_id"] == job_id
     mock_delay.assert_not_called()
 
 def test_post_courses_dedups_on_canonical_embedding():
@@ -188,9 +185,10 @@ def test_get_course_by_slug_not_found():
     assert resp.status_code == 404
 
 
-def test_post_courses_existing_course_returns_similar_list():
-    """A finished course close to the topic is offered as a candidate (200)
-    instead of silently auto-navigating — nothing is merged without consent."""
+def test_post_courses_exact_duplicate_course_attaches():
+    """An exact canonical-slug match against a finished course attaches (200
+    `exists`) instead of being offered as a candidate, so the client can
+    navigate straight to it. Similar-but-not-identical topics still preview."""
     headers = _auth_headers()
     from datetime import datetime, timezone
     from app.db import SessionLocal
@@ -202,7 +200,6 @@ def test_post_courses_existing_course_returns_similar_list():
         db.add(course)
         db.commit()
         db.refresh(course)
-        course_id = course.id
 
     with patch("app.services.courses._canonicalize", return_value="TypeScript"), \
          patch("app.services.courses.embed", return_value=[0.9] + [0.0] * 2047), \
@@ -210,12 +207,36 @@ def test_post_courses_existing_course_returns_similar_list():
         resp = client.post("/courses", json={"topic": "typescript"}, headers=headers)
     assert resp.status_code == 200
     body = resp.json()
+    assert body["status"] == "exists"
+    assert body["course"]["topic_slug"] == "typescript"
+    mock_delay.assert_not_called()
+
+
+def test_post_courses_similar_but_not_exact_previews_candidates():
+    """A near-but-not-identical topic still returns the candidate list (200
+    `similar`) — the learner decides whether to reuse it or generate anew."""
+    headers = _auth_headers()
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    from app.models.course import Course
+    with SessionLocal() as db:
+        course = Course(topic_slug="typescript-fundamentals", topic_raw="TypeScript Fundamentals",
+                        topic_embedding=[0.9] + [0.0] * 2047,
+                        created_at=datetime.now(timezone.utc))
+        db.add(course)
+        db.commit()
+        db.refresh(course)
+        course_id = course.id
+
+    with patch("app.services.courses._canonicalize", return_value="TypeScript Basics"), \
+         patch("app.services.courses.embed", return_value=[0.9] + [0.0] * 2047), \
+         patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
+        resp = client.post("/courses", json={"topic": "typescript basics"}, headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
     assert body["status"] == "similar"
-    assert len(body["candidates"]) == 1
-    cand = body["candidates"][0]
-    assert cand["id"] == course_id
-    assert cand["course_url"] == "/courses/typescript"
-    assert isinstance(cand["module_count"], int)
+    assert body["search_token"]
+    assert [c["id"] for c in body["candidates"]] == [course_id]
     mock_delay.assert_not_called()
 
 def test_post_courses_force_generates_new_course():

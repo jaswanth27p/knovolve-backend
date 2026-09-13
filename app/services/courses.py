@@ -170,6 +170,39 @@ def create_course_job(db: Session, user_id: int, topic_raw: str,
     token = course_preview.cache_key(topic_raw, user_id)
     course_preview.store_preview(token, canonical, embedding, topic_raw)
 
+    # Exact duplicate: attach to the existing course/job and let the client
+    # navigate straight to it, rather than showing it as a "similar" candidate.
+    # Match on the RAW topic (case/trim-insensitive) because canonicalization
+    # is an LLM call whose wording — and therefore slug — is not stable across
+    # submissions of the same text. Similar-but-not-identical topics still fall
+    # through to the candidate preview below.
+    raw_norm = topic_raw.strip().casefold()
+    slug = _slugify(canonical)
+    exact_course = db.scalar(
+        select(Course).where(
+            or_(
+                func.lower(func.trim(Course.topic_raw)) == raw_norm,
+                Course.topic_slug == slug,
+            )
+        )
+    )
+    if exact_course is not None:
+        course = _db_course(db, exact_course)
+        if course is not None:
+            touch_enrollment(db, user_id, course)
+            return _existing_response(course, db, user_id)
+    dup_job = db.scalar(
+        select(CourseJob).where(
+            or_(
+                func.lower(func.trim(CourseJob.topic_raw)) == raw_norm,
+                CourseJob.topic_slug == slug,
+            ),
+            CourseJob.status.in_(["pending", "running"]),
+        )
+    )
+    if dup_job is not None:
+        return CourseJobResponse(status="pending", job_id=dup_job.id)
+
     matches = course_preview.ranked_candidates(
         db, embedding, limit=3, threshold=settings.topic_candidate_threshold
     )
