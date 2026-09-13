@@ -1,13 +1,17 @@
 # backend/tests/test_assignment_generation.py
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+import pytest
 from app.db import SessionLocal
 from app.models.course import Course, Module, Chapter
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.assignment import Assignment, AssignmentQuestion
 from app.agents.assignment.nodes.generate_section_questions import QuestionDraft
 from app.agents.assignment.generate import generate_chapter_assignment
-from app.tasks.assignment_tasks import generate_chapter_assignment_task
+from app.tasks.assignment_tasks import (
+    generate_chapter_assignment_task,
+    generate_module_topup_task,
+)
 
 
 def _make_ready_chapter_content(slug: str, section_count: int = 1) -> int:
@@ -706,3 +710,33 @@ def test_generate_module_topup_marks_failed_when_assignment_has_no_module():
         assert topup is not None
         assert topup.status == "failed"
         assert topup.error is not None
+
+
+@pytest.mark.parametrize("symbol, task, args", [
+    ("generate_chapter_assignment", generate_chapter_assignment_task, (1,)),
+    ("generate_module_assignment", generate_module_assignment_task, (1,)),
+    ("generate_module_topup", generate_module_topup_task, (1, 2)),
+])
+def test_assignment_task_retries_transient_setup_errors(symbol, task, args):
+    """A DB/infra error escaping the generator (its own try/except only catches
+    the body, not the get-or-create/claim setup) must be handed to Task.retry so
+    Celery's backoff re-attempts it."""
+    with patch(f"app.tasks.assignment_tasks.{symbol}",
+               side_effect=ConnectionError("db connection dropped")), \
+         patch.object(task, "retry") as mock_retry:
+        task(*args)  # pyright: ignore[reportCallIssue]
+
+    mock_retry.assert_called_once()
+    assert isinstance(mock_retry.call_args.kwargs["exc"], ConnectionError)
+
+
+def test_assignment_task_does_not_retry_missing_row_value_error():
+    """A missing/deleted row (ValueError) is a caller bug, not transient infra;
+    it must propagate without consuming the Celery retry budget."""
+    with patch("app.tasks.assignment_tasks.generate_chapter_assignment",
+               side_effect=ValueError("ChapterContent 1 not found")), \
+         patch.object(generate_chapter_assignment_task, "retry") as mock_retry:
+        with pytest.raises(ValueError, match="not found"):
+            generate_chapter_assignment_task(1)  # pyright: ignore[reportCallIssue]
+
+    mock_retry.assert_not_called()

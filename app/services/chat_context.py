@@ -20,6 +20,40 @@ def _course_url(topic_slug: str) -> str:
     return f"{settings.frontend_url}/courses/{topic_slug}"
 
 
+def _load_course_modules(db: Session, course_id: int, user_id: int) -> list[ModuleSummary]:
+    """Active course's visible modules + chapters in a constant number of
+    queries (module query, chapter query, one batched pass-status query)."""
+    modules = (
+        db.query(Module)
+        .filter(*courses.visible_module_filter(course_id, user_id))
+        .order_by(Module.order)
+        .all()
+    )
+    module_ids = [m.id for m in modules]
+    chapters = (
+        db.query(Chapter).filter(Chapter.module_id.in_(module_ids)).order_by(Chapter.order).all()
+        if module_ids else []
+    )
+    chapters_by_module: dict[int, list[Chapter]] = {}
+    for chapter in chapters:
+        chapters_by_module.setdefault(chapter.module_id, []).append(chapter)
+    passed = progression.passed_chapter_ids(db, user_id, [c.id for c in chapters])
+
+    result: list[ModuleSummary] = []
+    for module in modules:
+        module_chapters = chapters_by_module.get(module.id, [])
+        if module.scope == "user" and not module_chapters:
+            continue  # never surface an empty extension bucket
+        result.append(ModuleSummary(
+            id=module.id, title=module.title,
+            chapters=[
+                ChapterSummary(id=c.id, title=c.title, completed=c.id in passed)
+                for c in module_chapters
+            ],
+        ))
+    return result
+
+
 def build_context_bundle(db: Session, user_id: int, route: RouteContext | None) -> LearnerContextBundle:
     dashboard = get_dashboard(db, user_id)
     my_courses = [
@@ -37,39 +71,39 @@ def build_context_bundle(db: Session, user_id: int, route: RouteContext | None) 
 
     course_slug = route.course_slug if route is not None else None
     if course_slug is not None:
-        course = db.scalar(select(Course).where(Course.topic_slug == course_slug))
-        if course is not None:
-            enrollment = db.scalar(
-                select(UserCourse).where(UserCourse.user_id == user_id, UserCourse.course_id == course.id)
-            )
+        # The dashboard already serialized this learner's courses; reuse that
+        # row when possible instead of re-querying Course/UserCourse.
+        matched = next(
+            (r for r in [*dashboard.in_progress, *dashboard.completed] if r.topic_slug == course_slug),
+            None,
+        )
+        if matched is not None:
             current_course = CourseSummary(
-                topic_slug=course.topic_slug, topic_raw=course.topic_raw,
-                status=enrollment.status if enrollment is not None else "not_started",
-                progress=enrollment.progress if enrollment is not None else 0.0,
-                course_url=_course_url(course.topic_slug),
+                topic_slug=matched.topic_slug, topic_raw=matched.topic_raw,
+                status=matched.status, progress=matched.progress,
+                course_url=_course_url(matched.topic_slug),
             )
-            if enrollment is not None:
-                statuses = get_concept_statuses(db, user_id, course.id)
-                weak = sorted(name for name, status in statuses.items() if status == "weak")
-                strong = sorted(name for name, status in statuses.items() if status == "strong")
-                modules = db.query(Module).filter(*courses.visible_module_filter(course.id, user_id)).order_by(Module.order).all()
-                current_course_modules = []
-                for m in modules:
-                    chapters = db.query(Chapter).filter_by(module_id=m.id).order_by(Chapter.order).all()
-                    if m.scope == "user" and not chapters:
-                        continue  # never surface an empty extension bucket
-                    current_course_modules.append(
-                        ModuleSummary(
-                            id=m.id, title=m.title,
-                            chapters=[
-                                ChapterSummary(
-                                    id=c.id, title=c.title,
-                                    completed=progression._chapter_passed(db, c.id, user_id),
-                                )
-                                for c in chapters
-                            ],
-                        )
-                    )
+            statuses = get_concept_statuses(db, user_id, matched.id)
+            weak = sorted(name for name, status in statuses.items() if status == "weak")
+            strong = sorted(name for name, status in statuses.items() if status == "strong")
+            current_course_modules = _load_course_modules(db, matched.id, user_id)
+        else:
+            course = db.scalar(select(Course).where(Course.topic_slug == course_slug))
+            if course is not None:
+                enrollment = db.scalar(
+                    select(UserCourse).where(UserCourse.user_id == user_id, UserCourse.course_id == course.id)
+                )
+                current_course = CourseSummary(
+                    topic_slug=course.topic_slug, topic_raw=course.topic_raw,
+                    status=enrollment.status if enrollment is not None else "not_started",
+                    progress=enrollment.progress if enrollment is not None else 0.0,
+                    course_url=_course_url(course.topic_slug),
+                )
+                if enrollment is not None:
+                    statuses = get_concept_statuses(db, user_id, course.id)
+                    weak = sorted(name for name, status in statuses.items() if status == "weak")
+                    strong = sorted(name for name, status in statuses.items() if status == "strong")
+                    current_course_modules = _load_course_modules(db, course.id, user_id)
 
     return LearnerContextBundle(
         in_progress_count=dashboard.in_progress_count,

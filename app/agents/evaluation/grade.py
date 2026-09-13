@@ -35,16 +35,49 @@ def _normalize(text: str) -> str:
     return text.strip().casefold()
 
 
+def _dispatch_remediation(db: Session, attempt: AssignmentAttempt, assignment: Assignment) -> None:
+    """Enqueue chapter remediation exactly once for a graded attempt.
+
+    Runs both on the normal post-grade path and on a redelivery whose attempt
+    is already "graded" (worker crashed after the graded commit, before/while
+    enqueuing). The merged tags are persisted in that same graded commit, so
+    the redelivery can still enqueue; ``remediation_dispatched_at`` stops it
+    from re-enqueuing once done, and the remediation agent is itself idempotent
+    (keyed on ``remediation_source_attempt_id``).
+    """
+    if assignment.level != "chapter":
+        return
+    tags = attempt.remediation_concept_tags
+    if not tags or attempt.remediation_dispatched_at is not None:
+        return
+    content = db.get(ChapterContent, assignment.chapter_content_id)
+    if content is None:
+        return
+    remediate_chapter_task.delay(  # pyright: ignore[reportFunctionMemberAccess]
+        content.chapter_id, attempt.user_id, tags, attempt.id,
+    )
+    attempt.remediation_dispatched_at = datetime.now(timezone.utc)
+    db.commit()
+
+
 def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
     attempt = db.get(AssignmentAttempt, attempt_id)
     if attempt is None:
         raise ValueError(f"AssignmentAttempt {attempt_id} not found")
-    if attempt.status != "grading":
-        return  # already graded/failed, or a duplicate task delivery
-
     assignment = db.get(Assignment, attempt.assignment_id)
     if assignment is None:
         raise ValueError(f"Assignment {attempt.assignment_id} not found")
+    if attempt.status == "graded":
+        # Redelivery after the graded commit but before the post-grade side
+        # effects ran (worker crash): finish the idempotent remediation
+        # dispatch and progress recompute rather than silently dropping them.
+        _dispatch_remediation(db, attempt, assignment)
+        course_id = progression.resolve_course_id(db, assignment)
+        if course_id is not None:
+            progression.update_course_progress(db, attempt.user_id, course_id)
+        return
+    if attempt.status != "grading":
+        return  # already failed, or a duplicate task delivery
 
     answers = db.scalars(
         select(AssignmentAnswer).where(AssignmentAnswer.attempt_id == attempt_id)
@@ -134,6 +167,14 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
         for tag in all_wrong_tags:
             if tag not in remediation_concept_tags:
                 remediation_concept_tags.append(tag)
+        # Persist the merged tags with the graded status, so a redelivery can
+        # still enqueue remediation if this task dies before _dispatch_remediation.
+        attempt.remediation_concept_tags = (
+            remediation_concept_tags
+            if assignment.level == "chapter" and remediation_concept_tags
+            else None
+        )
+        attempt.remediation_dispatched_at = None
         db.commit()
     except Exception as exc:
         # Rolls back any in-session, uncommitted grading (e.g. mcq/true_false
@@ -146,12 +187,7 @@ def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
         db.commit()
         return
 
-    if assignment.level == "chapter" and remediation_concept_tags:
-        content = db.get(ChapterContent, assignment.chapter_content_id)
-        if content is not None:
-            remediate_chapter_task.delay(  # pyright: ignore[reportFunctionMemberAccess]
-                content.chapter_id, attempt.user_id, remediation_concept_tags, attempt.id,
-            )
+    _dispatch_remediation(db, attempt, assignment)
 
     course_id = progression.resolve_course_id(db, assignment)
     if course_id is not None:

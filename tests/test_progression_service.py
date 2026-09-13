@@ -85,28 +85,54 @@ def test_progress_reaching_one_marks_completed_and_never_reverts():
         assert uc.status == "completed"
 
 
-def test_uses_latest_attempt_per_chapter_not_best():
+def test_chapter_pass_is_permanent_once_true():
+    """Design doc 05: `chapter_passed` is permanent once true, and mastery
+    (spec 02) relies on that — a later, worse attempt on the same chapter
+    must not flip it back to unpassed."""
     with SessionLocal() as db:
         course, chapters = _make_course_with_chapters(db, "prog-c", 1)
+        chapter, assignment = chapters[0]
         user = User(email="prog-c@example.com", password_hash="x")
         db.add(user); db.flush()
         db.add(UserCourse(user_id=user.id, course_id=course.id, status="in_progress", progress=0.0,
                            enrolled_at=_now(), last_opened_at=_now()))
-        # earlier good attempt, later bad attempt -> "latest" wins, chapter not passed
-        db.add(AssignmentAttempt(assignment_id=chapters[0][1].id, user_id=user.id, status="graded",
+        # earlier passing attempt, later failing attempt
+        db.add(AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="graded",
                                   overall_score=1.0, created_at=_now(), updated_at=_now()))
         db.commit()
         import time; time.sleep(0.01)
-        db.add(AssignmentAttempt(assignment_id=chapters[0][1].id, user_id=user.id, status="graded",
+        db.add(AssignmentAttempt(assignment_id=assignment.id, user_id=user.id, status="graded",
                                   overall_score=0.2, created_at=_now(), updated_at=_now()))
         db.commit()
-        user_id, course_id = user.id, course.id
+        user_id, course_id, chapter_id = user.id, course.id, chapter.id
 
     with SessionLocal() as db:
         progression.update_course_progress(db, user_id, course_id)
     with SessionLocal() as db:
         uc = db.query(UserCourse).filter_by(user_id=user_id, course_id=course_id).one()
-        assert uc.progress == 0.0
+        assert uc.progress == 1.0
+        assert uc.status == "completed"
+        assert progression._chapter_passed(db, chapter_id, user_id) is True
+
+
+def test_passed_chapter_ids_batches_match_per_chapter():
+    with SessionLocal() as db:
+        course, chapters = _make_course_with_chapters(db, "prog-e", 2)
+        user = User(email="prog-e@example.com", password_hash="x")
+        db.add(user); db.flush()
+        db.add(AssignmentAttempt(assignment_id=chapters[0][1].id, user_id=user.id, status="graded",
+                                  overall_score=0.9, created_at=_now(), updated_at=_now()))
+        db.add(AssignmentAttempt(assignment_id=chapters[1][1].id, user_id=user.id, status="graded",
+                                  overall_score=0.2, created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id = user.id
+        ids = [chapters[0][0].id, chapters[1][0].id]
+
+    with SessionLocal() as db:
+        got = progression.passed_chapter_ids(db, user_id, ids)
+        assert got == {ids[0]}
+        for cid in ids:
+            assert (cid in got) is progression._chapter_passed(db, cid, user_id)
 
 
 def test_chapter_passed_uses_users_latest_user_scoped_version_not_global():

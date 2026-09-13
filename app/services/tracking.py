@@ -2,10 +2,11 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.attempt import AssignmentAttempt
+from app.models.chapter_content import ChapterContent
 from app.models.course import Course, Module, Chapter
 from app.models.enrollment import UserCourse
 from app.models.learner_streak import LearnerStreak
@@ -19,36 +20,113 @@ from app.schemas.course import (
 from app.services import mastery
 from app.services.progression import PASS_THRESHOLD
 
+# Serializing the dashboard is O(queries) constant, but every serialized row
+# still costs a fixed slice of work; cap how many enrollments a single
+# dashboard call renders while the reported counts stay true totals.
+DASHBOARD_COURSE_LIMIT = 100
+
+
+def _serialize_tracked_bulk(
+    db: Session, user_id: int, ucs: list[UserCourse]
+) -> list[TrackedCourseResponse]:
+    """Serialize many enrolled courses in a constant number of queries.
+
+    The previous per-row serializer issued a handful of queries per course,
+    per module, per chapter (plus a full mastery pass per course), which made
+    ``list_my_courses``/``get_dashboard`` textbook N+1. This preloads every
+    course, visible module, chapter, relevant content row, and concept status
+    for the whole batch at once.
+    """
+    if not ucs:
+        return []
+    course_ids = list(dict.fromkeys(uc.course_id for uc in ucs))
+    courses = {c.id: c for c in db.scalars(select(Course).where(Course.id.in_(course_ids))).all()}
+    if len(courses) != len(course_ids):
+        raise HTTPException(status_code=500, detail="tracked course missing")
+
+    modules = db.scalars(
+        select(Module).where(
+            Module.course_id.in_(course_ids),
+            or_(Module.scope == "global", and_(Module.scope == "user", Module.user_id == user_id)),
+        ).order_by(Module.order)
+    ).all()
+    modules_by_course: dict[int, list[Module]] = {}
+    for module in modules:
+        modules_by_course.setdefault(module.course_id, []).append(module)
+
+    chapter_rows = db.scalars(
+        select(Chapter).where(Chapter.module_id.in_([m.id for m in modules])).order_by(Chapter.order)
+    ).all() if modules else []
+    chapters_by_module: dict[int, list[Chapter]] = {}
+    for chapter in chapter_rows:
+        chapters_by_module.setdefault(chapter.module_id, []).append(chapter)
+
+    included_modules: dict[int, list[Module]] = {}
+    chapter_ids_by_course: dict[int, list[int]] = {}
+    all_chapter_ids: list[int] = []
+    for course_id in course_ids:
+        visible = [
+            m for m in modules_by_course.get(course_id, [])
+            if m.scope != "user" or chapters_by_module.get(m.id)
+        ]
+        included_modules[course_id] = visible
+        ids = [c.id for m in visible for c in chapters_by_module.get(m.id, [])]
+        chapter_ids_by_course[course_id] = ids
+        all_chapter_ids.extend(ids)
+
+    contents = db.scalars(
+        select(ChapterContent).where(
+            ChapterContent.chapter_id.in_(all_chapter_ids),
+            or_(
+                ChapterContent.scope == "global",
+                and_(ChapterContent.scope == "user", ChapterContent.user_id == user_id),
+            ),
+        )
+    ).all() if all_chapter_ids else []
+    chosen = mastery.choose_relevant_contents(contents)
+    status_counts = mastery.get_concept_status_counts_for_courses(db, user_id, course_ids)
+
+    result: list[TrackedCourseResponse] = []
+    for uc in ucs:
+        course = courses[uc.course_id]
+        ids = chapter_ids_by_course.get(uc.course_id, [])
+        ready_rows = sum(
+            1 for cid in ids
+            if (content := chosen.get(cid)) is not None and content.status == "ready"
+        )
+        weak_count, strong_count = status_counts.get(uc.course_id, (0, 0))
+        result.append(TrackedCourseResponse(
+            id=course.id, topic_slug=course.topic_slug, topic_raw=course.topic_raw,
+            status=uc.status, progress=uc.progress, last_opened_at=uc.last_opened_at,
+            module_count=len(included_modules.get(uc.course_id, [])),
+            chapter_count=len(ids),
+            content_ready=len(ids) > 0 and ready_rows == len(ids),
+            weak_concept_count=weak_count,
+            strong_concept_count=strong_count,
+        ))
+    return result
+
 
 def _serialize_tracked(db: Session, uc: UserCourse) -> TrackedCourseResponse:
-    course = db.get(Course, uc.course_id)
-    if course is None:
-        raise HTTPException(status_code=500, detail="tracked course missing")
-    from app.services.courses import visible_module_filter
-    from app.services.progression import _resolve_relevant_content
-    modules = [
-        m for m in db.query(Module).filter(*visible_module_filter(course.id, uc.user_id)).all()
-        if m.scope != "user" or db.query(Chapter).filter_by(module_id=m.id).count() > 0
-    ]
-    chapter_ids = [
-        c.id for m in modules
-        for c in db.query(Chapter).filter_by(module_id=m.id).all()
-    ]
-    ready_rows = 0
-    for cid in chapter_ids:
-        content = _resolve_relevant_content(db, cid, uc.user_id)
-        if content is not None and content.status == "ready":
-            ready_rows += 1
-    content_ready = len(chapter_ids) > 0 and ready_rows == len(chapter_ids)
-    statuses = mastery.get_concept_statuses(db, uc.user_id, course.id).values()
-    return TrackedCourseResponse(
-        id=course.id, topic_slug=course.topic_slug, topic_raw=course.topic_raw,
-        status=uc.status, progress=uc.progress, last_opened_at=uc.last_opened_at,
-        module_count=len(modules), chapter_count=len(chapter_ids),
-        content_ready=content_ready,
-        weak_concept_count=sum(1 for s in statuses if s == "weak"),
-        strong_concept_count=sum(1 for s in statuses if s == "strong"),
+    """Single-row serializer: routed through the bulk path so the two can never
+    diverge."""
+    return _serialize_tracked_bulk(db, uc.user_id, [uc])[0]
+
+
+def get_tracked_course_by_slug(db: Session, user_id: int, slug: str) -> TrackedCourseResponse | None:
+    """The single tracked-course row for (user, course slug), or None.
+
+    Exists so the course-detail page can ask "is this one course tracked?"
+    without fetching and paginating the learner's entire library.
+    """
+    uc = db.scalar(
+        select(UserCourse)
+        .join(Course, Course.id == UserCourse.course_id)
+        .where(UserCourse.user_id == user_id, Course.topic_slug == slug)
     )
+    if uc is None:
+        return None
+    return _serialize_tracked(db, uc)
 
 
 def list_my_courses(
@@ -80,18 +158,39 @@ def list_my_courses(
     query = query.offset((page - 1) * limit).limit(limit)
 
     rows = db.scalars(query).all()
-    return [_serialize_tracked(db, uc) for uc in rows], total
+    return _serialize_tracked_bulk(db, user_id, list(rows)), total
 
 
 def get_dashboard(db: Session, user_id: int) -> DashboardResponse:
-    rows = db.query(UserCourse).filter_by(user_id=user_id).order_by(UserCourse.last_opened_at.desc()).all()
-    in_progress = [_serialize_tracked(db, uc) for uc in rows if uc.status == "in_progress"]
-    completed = [_serialize_tracked(db, uc) for uc in rows if uc.status == "completed"]
+    # Cap the rows we serialize (recent first), but report true totals from an
+    # aggregate so a learner with many enrollments never sees undercounted
+    # progress just because the payload was bounded.
+    rows = (
+        db.query(UserCourse)
+        .filter_by(user_id=user_id)
+        .order_by(UserCourse.last_opened_at.desc())
+        .limit(DASHBOARD_COURSE_LIMIT)
+        .all()
+    )
+    in_progress = _serialize_tracked_bulk(
+        db, user_id, [uc for uc in rows if uc.status == "in_progress"]
+    )
+    completed = _serialize_tracked_bulk(
+        db, user_id, [uc for uc in rows if uc.status == "completed"]
+    )
+    status_counts: dict[str, int] = {}
+    for status_value, status_count in db.execute(
+        select(UserCourse.status, func.count())
+        .where(UserCourse.user_id == user_id)
+        .group_by(UserCourse.status)
+    ).all():
+        status_counts[status_value] = status_count
     streak = db.query(LearnerStreak).filter_by(user_id=user_id).first()
     return DashboardResponse(
         in_progress=in_progress, completed=completed,
-        in_progress_count=len(in_progress), completed_count=len(completed),
-        total_count=len(rows),
+        in_progress_count=status_counts.get("in_progress", 0),
+        completed_count=status_counts.get("completed", 0),
+        total_count=sum(status_counts.values()),
         streak=StreakResponse(
             current=streak.current_streak if streak else 0,
             longest=streak.longest_streak if streak else 0,

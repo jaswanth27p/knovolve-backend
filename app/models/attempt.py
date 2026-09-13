@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 
@@ -13,8 +13,27 @@ class AssignmentAttempt(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # fraction correct, null until graded
     verdict_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)  # LLM's holistic reasoning for the pass/fail + remediation-targeting verdict; None until graded
+    # Merged remediation tags (LLM verdict + deterministic all-wrong backstop),
+    # persisted in the same commit that flips status to "graded" so a worker
+    # crash before the remediation task is enqueued can be healed on
+    # redelivery instead of silently dropping remediation. Null for
+    # module-level attempts (which never remediate) and when nothing qualified.
+    remediation_concept_tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Set once remediation has actually been enqueued; guards against
+    # re-dispatching on every redelivery. Null while still owed.
+    remediation_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # Covers progression._has_passing_attempt / passed_chapter_ids, which
+        # filter on (assignment_id, user_id, status) and compare/order on
+        # score/created_at once per chapter from several hot read paths.
+        Index(
+            "ix_assignment_attempts_assignment_user_status_created",
+            "assignment_id", "user_id", "status", "created_at",
+        ),
+    )
 
 
 class AssignmentAnswer(Base):

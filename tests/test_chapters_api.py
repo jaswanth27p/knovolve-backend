@@ -116,8 +116,8 @@ def test_content_endpoint_tails_redis_for_pending_diagram():
     # immediately rather than waiting on a redis message that will never come
     # in this test (no worker is running).
     with patch("app.services.chapter_content.stream_chapter_content", return_value=iter(fake_events)), \
-         patch("app.services.chapter_content.redis.Redis.from_url") as mock_from_url:
-        mock_from_url.return_value.pubsub.return_value.get_message.return_value = None
+         patch("app.services.chapter_content._get_client") as mock_get_client:
+        mock_get_client.return_value.pubsub.return_value.get_message.return_value = None
         resp = client.get(f"/courses/{slug}/chapters/{chapter_id}/content",
                            headers={"Authorization": f"Bearer {token}"})
 

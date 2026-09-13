@@ -367,6 +367,37 @@ def test_retry_non_failed_job_returns_409():
     assert resp.status_code == 409
 
 
+def test_retry_other_users_job_returns_404():
+    """Retry re-queues paid generation, so a caller must not be able to retry a
+    job another user created. 404 (not 403) keeps the job id indistinguishable
+    from a nonexistent one."""
+    headers = _auth_headers()
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    from app.models.course import CourseJob
+    from app.models.user import User
+    other_id = None
+    with SessionLocal() as db:
+        other = User(email="other-retry@example.com", password_hash="x")
+        db.add(other)
+        db.commit()
+        db.refresh(other)
+        other_id = other.id
+        job = CourseJob(topic_slug="someone-elses-topic", topic_raw="Someone Else's Topic",
+                        topic_embedding=[1.0] + [0.0] * 2047, status="failed",
+                        created_by_user_id=other_id,
+                        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+
+    with patch("app.services.courses.run_course_creation_job.delay") as mock_delay:
+        resp = client.post(f"/courses/jobs/{job_id}/retry", headers=headers)
+    assert resp.status_code == 404
+    mock_delay.assert_not_called()
+
+
 def test_retry_attaches_course_created_elsewhere():
     """If a course for the failed topic now exists, retry must attach it instead
     of regenerating — no wasted generation."""

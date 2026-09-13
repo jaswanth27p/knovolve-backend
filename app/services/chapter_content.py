@@ -16,6 +16,18 @@ from app.models.course import Course, Module, Chapter
 from app.realtime.chapter_content_events import channel_name
 from app.schemas.course import ChapterContentSectionResponse, ChapterVersionDetail, ChapterVersionSummary
 
+# Shared client, mirroring app.realtime.chapter_content_events and
+# app.services.course_preview: a fresh from_url() per SSE stream open churned a
+# connection pool per request.
+_client: redis.Redis | None = None
+
+
+def _get_client() -> redis.Redis:
+    global _client
+    if _client is None:
+        _client = redis.Redis.from_url(settings.redis_url)
+    return _client
+
 
 def get_chapter(db: Session, course: Course, chapter_id: int, user_id: int | None = None) -> Chapter:
     base = db.query(Chapter).join(Module, Chapter.module_id == Module.id).filter(
@@ -64,7 +76,7 @@ def _tail_pending_diagrams(db: Session, chapter_content_id: int,
     #   - anything committed after our SUBSCRIBE is delivered to us on the channel.
     # The old order (reconcile-then-subscribe) left a window — a diagram finishing
     # between the two was missed by both paths and stuck "pending" forever.
-    client = redis.Redis.from_url(settings.redis_url)
+    client = _get_client()
     pubsub = client.pubsub()
     pubsub.subscribe(channel_name(chapter_content_id))
     deadline = time.monotonic() + settings.diagram_stream_timeout_seconds

@@ -10,7 +10,6 @@ from app.schemas.course import (
     ExtensionJobResponse,
 )
 from app.services import course_extension, courses
-from app.tasks.course_extension_task import run_course_extension_job
 
 router = APIRouter(prefix="/courses/{slug}/extensions", tags=["courses"])
 
@@ -20,7 +19,6 @@ def create_extension(slug: str, body: CreateExtensionRequest, response: Response
                      db: Session = Depends(get_session), user: User = Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     job = course_extension.create_extension_job(db, user.id, course, body.message)
-    run_course_extension_job.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return ExtensionJobResponse(status=job.status, job_id=job.id, request=job.request,
                                 created_at=job.created_at, updated_at=job.updated_at)
 

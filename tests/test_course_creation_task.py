@@ -2,12 +2,16 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import StateSnapshot
 
 from app.agents.course_creation.graph import CourseGenerationError
+from app.agents.course_creation.state import CourseCreationState
 from app.db import SessionLocal
 from app.models.course import Course, CourseJob
 from app.tasks.course_creation_task import (
     GENERIC_JOB_ERROR,
+    _invoke_generation,
     run_course_creation_job,
 )
 
@@ -169,7 +173,13 @@ def test_force_job_seeds_allow_duplicate_into_state():
         course_id = db.query(Course).filter_by(topic_slug="celery-force-existing").one().id
 
     with patch("app.tasks.course_creation_task.build_course_creation_graph") as mock_build:
-        mock_build.return_value.get_state.return_value = MagicMock(next=None)
+        # A real fresh-thread snapshot (no checkpoint): langgraph returns
+        # metadata=None and empty values when the thread has no checkpoint, so
+        # this must still invoke from initial_state.
+        mock_build.return_value.get_state.return_value = StateSnapshot(
+            values={}, next=(), config={"configurable": {"thread_id": str(job_id)}},
+            metadata=None, created_at=None, parent_config=None, tasks=(), interrupts=(),
+        )
         mock_build.return_value.invoke.return_value = {"error": None, "existing_course_id": course_id}
         run_course_creation_job(job_id)  # pyright: ignore[reportCallIssue]
         initial_state = mock_build.return_value.invoke.call_args.args[0]
@@ -278,3 +288,93 @@ def test_transient_failure_resumes_on_next_attempt_without_regenerating(monkeypa
         assert job is not None
         assert job.status == "succeeded"
         assert db.query(Course).filter_by(topic_slug="celery-resume-transient").count() == 1
+
+
+def _config(thread_id: int = 1) -> RunnableConfig:
+    return {"configurable": {"thread_id": str(thread_id)}}
+
+
+def _initial_state() -> CourseCreationState:
+    return {
+        "job_id": 1,
+        "topic_raw": "topic",
+        "topic_slug": "topic",
+        "topic_embedding": [0.0] * 2048,
+        "existing_course_id": None,
+        "modules": None,
+        "concepts": None,
+        "concept_edges": None,
+        "error": None,
+    }
+
+
+def _snapshot(*, values, next, checkpoint_id=None, metadata=None) -> StateSnapshot:
+    configurable = {"thread_id": "1"}
+    if checkpoint_id is not None:
+        configurable["checkpoint_id"] = checkpoint_id
+    return StateSnapshot(
+        values=values,
+        next=next,
+        config={"configurable": configurable},
+        metadata=metadata,
+        created_at="2026-01-01T00:00:00+00:00" if metadata else None,
+        parent_config=None,
+        tasks=(),
+        interrupts=(),
+    )
+
+
+def test_invoke_generation_completed_checkpoint_returns_saved_state_without_reinvoke():
+    """A COMPLETED checkpoint has empty next too. A redelivery after the graph
+    finished but before job.status='succeeded' was committed must return the
+    checkpointed result, not regenerate the whole course."""
+    completed = _snapshot(
+        values={"error": None, "existing_course_id": 42},
+        next=(),
+        checkpoint_id="cp-completed",
+        metadata={"step": 6, "source": "loop", "writes": {}, "parents": {}},
+    )
+    graph = MagicMock()
+    graph.get_state.return_value = completed
+
+    result = _invoke_generation(graph, _initial_state(), _config(1), 1)
+
+    assert result == {"error": None, "existing_course_id": 42}
+    graph.invoke.assert_not_called()
+
+
+def test_invoke_generation_interrupted_checkpoint_resumes_with_none_input():
+    """A non-empty next means a mid-run checkpoint: re-invoke with None input
+    so langgraph re-drives only the pending node."""
+    interrupted = _snapshot(
+        values={"error": None, "existing_course_id": None},
+        next=("build_concept_graph",),
+        checkpoint_id="cp-interrupted",
+        metadata={"step": 3, "source": "loop", "writes": {}, "parents": {}},
+    )
+    graph = MagicMock()
+    graph.get_state.return_value = interrupted
+    graph.invoke.return_value = {"error": None, "existing_course_id": 7}
+    config = _config(1)
+
+    result = _invoke_generation(graph, _initial_state(), config, 1)
+
+    assert result == {"error": None, "existing_course_id": 7}
+    graph.invoke.assert_called_once_with(None, config=config, durability="sync")
+
+
+def test_invoke_generation_fresh_thread_invokes_initial_state():
+    """No checkpoint (fresh thread) invokes normally from initial_state."""
+    fresh = _snapshot(
+        values={}, next=(), checkpoint_id=None, metadata=None,
+    )
+    graph = MagicMock()
+    graph.get_state.return_value = fresh
+    graph.invoke.return_value = {"error": None, "existing_course_id": 9}
+    initial_state = _initial_state()
+    config = _config(1)
+
+    result = _invoke_generation(graph, initial_state, config, 1)
+
+    assert result == {"error": None, "existing_course_id": 9}
+    graph.invoke.assert_called_once_with(initial_state, config=config, durability="sync")

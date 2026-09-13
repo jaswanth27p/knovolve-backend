@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
@@ -74,19 +75,56 @@ def test_append_chapters_adds_to_bucket_with_order():
 def test_create_job_blocks_concurrent_run():
     course = _make_course()
     with SessionLocal() as db:
-        svc.create_extension_job(db, 5, course, "first")
-        db.commit()
-        with pytest.raises(HTTPException) as exc:
-            svc.create_extension_job(db, 5, course, "second")
+        with patch("app.tasks.course_extension_task.run_course_extension_job.delay") as mock_delay:
+            first = svc.create_extension_job(db, 5, course, "first")
+            mock_delay.assert_called_once_with(first.id)
+            db.commit()
+            with pytest.raises(HTTPException) as exc:
+                svc.create_extension_job(db, 5, course, "second")
+            assert exc.value.status_code == 409
+            other = svc.create_extension_job(db, 6, course, "other user okay")
+            assert mock_delay.call_count == 2
+            mock_delay.assert_called_with(other.id)
+            db.commit()
+
+
+def test_create_job_recovers_from_insert_race_as_409():
+    """TOCTOU backstop: two concurrent requests both pass the active-job check,
+    the loser's INSERT violates the partial unique index, and the service must
+    translate that IntegrityError into a clean 409 rather than a 500."""
+    course = _make_course()
+    with SessionLocal() as db:
+        real_scalar = db.scalar
+        calls: list[int] = []
+
+        def racing_scalar(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                with SessionLocal() as other:
+                    now = datetime.now(timezone.utc)
+                    other.add(CourseExtensionJob(
+                        course_id=course.id, user_id=5, request="winner",
+                        status="pending", created_at=now, updated_at=now,
+                    ))
+                    other.commit()
+                return None
+            return real_scalar(*args, **kwargs)
+
+        with patch.object(db, "scalar", side_effect=racing_scalar):
+            with pytest.raises(HTTPException) as exc:
+                svc.create_extension_job(db, 5, course, "loser")
         assert exc.value.status_code == 409
-        svc.create_extension_job(db, 6, course, "other user okay")
-        db.commit()
+        assert exc.value.detail == "an extension is already running for this course"
+
+    with SessionLocal() as db:
+        assert db.query(CourseExtensionJob).filter_by(course_id=course.id, user_id=5).count() == 1
 
 
 def test_get_job_and_list_and_delete():
     course = _make_course()
     with SessionLocal() as db:
-        job = svc.create_extension_job(db, 5, course, "add networking")
+        with patch("app.tasks.course_extension_task.run_course_extension_job.delay"):
+            job = svc.create_extension_job(db, 5, course, "add networking")
         db.commit()
         fetched = svc.get_extension_job(db, 5, course, job.id)
         assert fetched.status == "pending"

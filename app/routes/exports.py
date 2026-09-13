@@ -7,7 +7,6 @@ from app.models.export import ExportJob
 from app.models.user import User
 from app.schemas.export import CreateExportRequest, ExportJobResponse
 from app.services import courses, exports as export_service
-from app.tasks.export_tasks import run_export_task
 
 router = APIRouter(prefix="/courses/{slug}/exports", tags=["exports"])
 
@@ -29,7 +28,6 @@ def create_export(slug: str, body: CreateExportRequest, db: Session = Depends(ge
                   user: User = Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     job = export_service.create_export_job(db, user.id, course, body.kind, body.params)
-    run_export_task.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return _serialize(job)
 
 
@@ -52,7 +50,6 @@ def retry_export(slug: str, export_id: int, db: Session = Depends(get_session),
                  user: User = Depends(get_current_user)):
     course = courses.get_course_by_slug(db, slug)
     job = export_service.retry_export_job(db, user.id, course, export_id)
-    run_export_task.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return _serialize(job)
 
 

@@ -123,6 +123,78 @@ def test_get_concept_statuses_returns_all_three_bands():
         }
 
 
+def test_get_concept_status_counts_for_courses_matches_per_course_statuses():
+    with SessionLocal() as db:
+        course_a, module_a, chapters_a = _make_course_with_chapters(db, "mastery-bulk-a", 2)
+        chapter_weak, content_weak, assignment_weak = chapters_a[0]
+        chapter_strong, _content_strong, assignment_strong = chapters_a[1]
+        content_weak.remediation_target_tags = ["weak-concept"]
+        db.flush()
+        db.add(Concept(course_id=course_a.id, name="weak-concept", chapter_id=chapter_weak.id))
+        db.add(Concept(course_id=course_a.id, name="strong-concept", chapter_id=chapter_strong.id))
+
+        course_b, _module_b, chapters_b = _make_course_with_chapters(db, "mastery-bulk-b", 1)
+        chapter_b, _content_b, _assignment_b = chapters_b[0]
+        db.add(Concept(course_id=course_b.id, name="solo-concept", chapter_id=chapter_b.id))
+        db.flush()
+
+        user = User(email="mastery-bulk@example.com", password_hash="x")
+        db.add(user); db.flush()
+
+        db.add(AssignmentAttempt(assignment_id=assignment_weak.id, user_id=user.id, status="graded",
+                                  overall_score=0.2, created_at=_now(), updated_at=_now()))
+        db.add(AssignmentAttempt(assignment_id=assignment_strong.id, user_id=user.id, status="graded",
+                                  overall_score=0.85, created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id, course_a_id, course_b_id = user.id, course_a.id, course_b.id
+
+    with SessionLocal() as db:
+        counts = mastery.get_concept_status_counts_for_courses(db, user_id, [course_a_id, course_b_id])
+
+        def _counts_from_statuses(course_id):
+            statuses = mastery.get_concept_statuses(db, user_id, course_id).values()
+            return (sum(1 for s in statuses if s == "weak"), sum(1 for s in statuses if s == "strong"))
+
+        assert counts[course_a_id] == _counts_from_statuses(course_a_id) == (1, 1)
+        # course B's concept is never made weak -> strong.
+        assert counts[course_b_id] == _counts_from_statuses(course_b_id) == (0, 1)
+
+
+def test_get_concept_status_counts_for_courses_is_isolated_per_course():
+    """A weak tag in one course must not colour a same-named strong concept in
+    another course when both are bulk-counted together."""
+    with SessionLocal() as db:
+        weak_course, _wm, weak_chapters = _make_course_with_chapters(db, "mastery-iso-weak", 1)
+        weak_chapter, weak_content, _wa = weak_chapters[0]
+        weak_content.remediation_target_tags = ["shared-name"]
+        db.flush()
+        db.add(Concept(course_id=weak_course.id, name="shared-name", chapter_id=weak_chapter.id))
+
+        strong_course, _sm, strong_chapters = _make_course_with_chapters(db, "mastery-iso-strong", 1)
+        strong_chapter, _sc, strong_assignment = strong_chapters[0]
+        db.add(Concept(course_id=strong_course.id, name="shared-name", chapter_id=strong_chapter.id))
+        db.flush()
+
+        user = User(email="mastery-iso@example.com", password_hash="x")
+        db.add(user); db.flush()
+        db.add(AssignmentAttempt(assignment_id=strong_assignment.id, user_id=user.id, status="graded",
+                                  overall_score=0.9, created_at=_now(), updated_at=_now()))
+        db.commit()
+        user_id, weak_course_id, strong_course_id = user.id, weak_course.id, strong_course.id
+
+    with SessionLocal() as db:
+        counts = mastery.get_concept_status_counts_for_courses(
+            db, user_id, [weak_course_id, strong_course_id]
+        )
+        assert counts[weak_course_id] == (1, 0)
+        assert counts[strong_course_id] == (0, 1)
+
+
+def test_get_concept_status_counts_for_courses_empty_input():
+    with SessionLocal() as db:
+        assert mastery.get_concept_status_counts_for_courses(db, 1, []) == {}
+
+
 def test_get_module_lagged_history_includes_only_versions_with_tags_regardless_of_pass_status():
     with SessionLocal() as db:
         course, module, chapters = _make_course_with_chapters(db, "mastery-d", 1)

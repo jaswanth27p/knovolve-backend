@@ -34,7 +34,7 @@ def test_extend_endpoints_require_auth():
 def test_create_poll_list_delete_flow():
     headers = _auth_headers()
     _make_course()
-    with patch("app.routes.course_extensions.run_course_extension_job.delay") as mock_delay:
+    with patch("app.tasks.course_extension_task.run_course_extension_job.delay") as mock_delay:
         resp = client.post("/courses/ext-api-course/extensions",
                            json={"message": "add tcp"}, headers=headers)
     assert resp.status_code == 202
@@ -81,7 +81,7 @@ def test_create_poll_list_delete_flow():
 def test_list_jobs_returns_recent_first():
     headers = _auth_headers()
     _make_course()
-    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+    with patch("app.tasks.course_extension_task.run_course_extension_job.delay"):
         first = client.post("/courses/ext-api-course/extensions",
                             json={"message": "first"}, headers=headers).json()["job_id"]
 
@@ -94,7 +94,7 @@ def test_list_jobs_returns_recent_first():
         job.updated_at = datetime.now(timezone.utc)
         db.commit()
 
-    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+    with patch("app.tasks.course_extension_task.run_course_extension_job.delay"):
         second = client.post("/courses/ext-api-course/extensions",
                              json={"message": "second"}, headers=headers).json()["job_id"]
 
@@ -116,7 +116,7 @@ def test_latest_job_survives_navigation():
     the learner navigates away and back."""
     headers = _auth_headers()
     _make_course()
-    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+    with patch("app.tasks.course_extension_task.run_course_extension_job.delay"):
         resp = client.post("/courses/ext-api-course/extensions",
                            json={"message": "add tcp"}, headers=headers)
     job_id = resp.json()["job_id"]
@@ -138,11 +138,11 @@ def test_latest_job_none_when_never_extended():
 def test_concurrent_run_rejected():
     headers = _auth_headers()
     _make_course()
-    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+    with patch("app.tasks.course_extension_task.run_course_extension_job.delay"):
         first = client.post("/courses/ext-api-course/extensions",
                             json={"message": "x"}, headers=headers)
     assert first.status_code == 202
-    with patch("app.routes.course_extensions.run_course_extension_job.delay"):
+    with patch("app.tasks.course_extension_task.run_course_extension_job.delay"):
         second = client.post("/courses/ext-api-course/extensions",
                              json={"message": "y"}, headers=headers)
     assert second.status_code == 409

@@ -100,7 +100,7 @@ def visible_versions(db: Session, chapter: Chapter, user_id: int, include_remedi
 def _version_label(content: ChapterContent) -> str:
     if content.remediation_source_attempt_id is None:
         return f"Version {content.version}"
-    return f"Version {content.version}"
+    return f"Personalized version {content.version}"
 
 
 def _missing_global_content(db: Session, course: Course) -> list[int]:
@@ -323,7 +323,6 @@ def gather_course_payload(db: Session, course: Course, user_id: int, full: bool)
                     "versions": [
                         {
                             "label": _version_label(content),
-                            "is_remediation": content.remediation_source_attempt_id is not None,
                             "sections": _version_sections(db, content),
                         }
                         for content in visible_versions(db, chapter, user_id, include_remediation=full)
@@ -347,7 +346,6 @@ def gather_course_payload(db: Session, course: Course, user_id: int, full: bool)
                         "versions": [
                             {
                                 "label": _version_label(content),
-                                "is_remediation": content.remediation_source_attempt_id is not None,
                                 "sections": _version_sections(db, content),
                             }
                             for content in visible_versions(db, chapter, user_id, include_remediation=True)
@@ -441,6 +439,12 @@ def create_export_job(
     db.add(job)
     db.commit()
     db.refresh(job)
+    # Imported locally because app.tasks.export_tasks imports this module;
+    # a top-level import would be circular. Dispatch lives here (not in the
+    # route) so the job row and its worker enqueue share one owner.
+    from app.tasks.export_tasks import run_export_task
+
+    run_export_task.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return job
 
 

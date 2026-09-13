@@ -5,6 +5,14 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://knovolve:knovolve@localhost:5432/knovolve"
+    # SQLAlchemy connection pool. Bounded (size + overflow) so a fan-out of
+    # worker threads/processes can't exhaust Postgres connections; pre_ping
+    # validates a pooled connection before use (transparently replacing one
+    # killed by a pg restart or network blip) and recycle_days returns idle
+    # connections well under Postgres' server-side timeout.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_recycle_seconds: int = 1800
     redis_url: str = "redis://localhost:6379/0"
     jwt_secret: str
     jwt_access_ttl_minutes: int = 15
@@ -108,6 +116,11 @@ class Settings(BaseSettings):
     # Individual units are idempotent, so a redelivered run re-does only what is
     # missing; this only needs to exceed a healthy parallel sweep.
     celery_generation_run_time_limit_seconds: int = 2 * 60 * 60
+    # Soft limit must fire *before* the hard SIGKILL so the task's except block
+    # can mark the run failed before the process dies; equality (the old
+    # behavior) gave the except block zero margin. 95% of the hard cap leaves a
+    # six-minute margin at the default 2h. Keep strictly below the hard cap.
+    celery_generation_run_soft_time_limit_seconds: int = 2 * 60 * 60 * 95 // 100
     web_request_timeout_seconds: float = 15.0
     # LangGraph checkpoints (partial run state) for finished jobs are pruned
     # after this many days; running jobs' checkpoints are never pruned.

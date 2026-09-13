@@ -347,6 +347,58 @@ def test_remediation_not_dispatched_when_remediation_tags_empty():
     mock_remediate_task.delay.assert_not_called()
 
 
+def test_redelivery_of_graded_attempt_completes_remediation_dispatch():
+    """Crash window: the attempt was committed "graded" with its merged tags
+    persisted, but the process died before enqueuing remediation. A redelivered
+    task must finish the (idempotent) dispatch, not silently skip it via the
+    non-grading early return."""
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-remediate-redeliver", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "wrong"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        user_id = attempt.user_id
+        chapter_id = _chapter_id_for_assignment(db, assignment_id)
+        attempt.status = "graded"
+        attempt.overall_score = 0.0
+        attempt.remediation_concept_tags = ["t1"]
+        attempt.remediation_dispatched_at = None
+        db.commit()
+
+    with patch("app.agents.evaluation.grade.grade_assignment_answers") as mock_grader, \
+         patch("app.agents.evaluation.grade.remediate_chapter_task") as mock_remediate_task:
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+
+    mock_grader.assert_not_called()  # redelivery must not re-grade / re-call the LLM
+    mock_remediate_task.delay.assert_called_once_with(chapter_id, user_id, ["t1"], attempt_id)
+    with SessionLocal() as db:
+        refreshed = db.get(AssignmentAttempt, attempt_id)
+        assert refreshed is not None
+        assert refreshed.remediation_dispatched_at is not None
+
+
+def test_redelivery_does_not_redispatch_already_dispatched_remediation():
+    with SessionLocal() as db:
+        assignment_id = _make_assignment_with_questions(db, "grade-remediate-norepeat", [
+            {"type": "mcq", "correct_answer": "a", "concept_tag": "t1"},
+        ])
+        attempt_id = _make_attempt(db, assignment_id, {0: "wrong"})
+        attempt = db.get(AssignmentAttempt, attempt_id)
+        assert attempt is not None
+        attempt.status = "graded"
+        attempt.remediation_concept_tags = ["t1"]
+        attempt.remediation_dispatched_at = _now()
+        db.commit()
+
+    with patch("app.agents.evaluation.grade.remediate_chapter_task") as mock_remediate_task:
+        with SessionLocal() as db:
+            grade_assignment_attempt(attempt_id, db)
+    mock_remediate_task.delay.assert_not_called()
+
+
 def test_remediation_never_dispatched_for_module_level_attempt():
     with SessionLocal() as db:
         course = Course(topic_slug="grade-remediate-c", topic_raw="grade-remediate-c",

@@ -60,33 +60,60 @@ def _transient_retry_delay_seconds(task: Task) -> int:
     )
 
 
+def _has_checkpoint(state) -> bool:
+    """Whether a snapshot came from a persisted checkpoint.
+
+    langgraph's ``get_state`` returns a default snapshot with ``metadata=None``
+    (and no ``checkpoint_id`` in its config) when the thread has no checkpoint
+    at all; a real checkpoint always carries non-None metadata (verified against
+    langgraph 1.2.11). Treating the no-checkpoint case as "completed" would
+    return an empty state and blank-page the job, so it must be distinguished
+    from a genuinely finished run.
+    """
+    if state is None:
+        return False
+    if getattr(state, "metadata", None) is not None:
+        return True
+    configurable = (getattr(state, "config", None) or {}).get("configurable") or {}
+    return bool(configurable.get("checkpoint_id"))
+
+
 def _invoke_generation(graph, initial_state: CourseCreationState, config: RunnableConfig,
                        job_id: int) -> dict:
-    """Run the graph, resuming an interrupted prior run when one exists.
+    """Run the graph, or return an already-finished run's saved state.
 
     Every invoke uses synchronous durability so every completed superstep is
     checkpointed before the next runs — that is what makes crash-resume
     possible (a worker killed mid-run leaves a partially-written run whose
     ``next`` node is pending).
 
-    If a previous attempt died mid-run (worker crash, or a transient node error
-    being retried by celery), ``get_state(...).next`` is non-empty and we
-    re-invoke with ``None`` input: langgraph re-drives only the still-pending
-    node from its checkpoint instead of regenerating the whole course. A fresh
-    thread (no checkpoint, or a completed run) invokes normally from
-    ``initial_state``.
+    Three cases, distinguished from the snapshot:
+
+    - No checkpoint at all (fresh thread): invoke from ``initial_state``.
+    - Checkpoint with a non-empty ``next`` (interrupted): re-invoke with
+      ``None`` input so langgraph re-drives only the still-pending node from
+      its checkpoint instead of regenerating the whole course.
+    - A checkpoint with empty ``next`` is COMPLETED. A worker crash between
+      graph completion and the ``job.status='succeeded'`` commit leaves the
+      job "running", so the redelivered task must return the checkpointed
+      values instead of re-running the whole pipeline.
     """
     try:
         state = graph.get_state(config)
     except Exception:  # noqa: BLE001 - a broken read must not block generation
         state = None
-    if state is not None and bool(state.next):
+    if state is not None and _has_checkpoint(state):
+        if state.next:
+            logger.info(
+                "job %s: resuming interrupted run at %s instead of regenerating",
+                job_id,
+                list(state.next),
+            )
+            return graph.invoke(None, config=config, durability="sync")
         logger.info(
-            "job %s: resuming interrupted run at %s instead of regenerating",
-            job_id,
-            list(state.next),
+            "job %s: checkpoint already completed; returning saved state", job_id
         )
-        return graph.invoke(None, config=config, durability="sync")
+        return state.values
     return graph.invoke(initial_state, config=config, durability="sync")
 
 

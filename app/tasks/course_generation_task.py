@@ -119,7 +119,7 @@ def _run_unit_isolated(run_id: int, user_id: int, unit: dict) -> tuple[str, str]
 @celery_app.task(
     bind=True,
     time_limit=settings.celery_generation_run_time_limit_seconds,
-    soft_time_limit=settings.celery_generation_run_time_limit_seconds,
+    soft_time_limit=settings.celery_generation_run_soft_time_limit_seconds,
 )
 def run_course_generation_task(self: Task, run_id: int) -> None:
     with SessionLocal() as db:

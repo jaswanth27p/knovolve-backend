@@ -26,7 +26,7 @@ def test_scope_helpers_separate_global_and_user_versions():
         assert [c.version for c in svc.visible_versions(db, extra, 51, include_remediation=True)] == [1]
 
 
-def test_version_label_omits_personalized_prefix_for_remediation():
+def test_version_label_distinguishes_remediation_from_base():
     course_id = _seed_gate_course("export-version-label")
     with SessionLocal() as db:
         course = db.get(Course, course_id)
@@ -41,7 +41,7 @@ def test_version_label_omits_personalized_prefix_for_remediation():
             )
         ).one()
         assert svc._version_label(base) == f"Version {base.version}"
-        assert svc._version_label(remediation) == f"Version {remediation.version}"
+        assert svc._version_label(remediation) == f"Personalized version {remediation.version}"
 
 
 def _detail_code(exc: pytest.ExceptionInfo[HTTPException]) -> str:
@@ -273,11 +273,16 @@ def test_retry_export_job_reuses_params_and_rejects_non_failed():
             "item_count": None,
             "notes": None,
         }
-        failed = svc.create_export_job(db, 51, course, "custom", {"brief": "summarize", "plan": plan})
-        failed.status = "failed"
-        db.commit()
+        with patch("app.tasks.export_tasks.run_export_task.delay") as mock_delay:
+            failed = svc.create_export_job(db, 51, course, "custom", {"brief": "summarize", "plan": plan})
+            mock_delay.assert_called_once_with(failed.id)
+            failed.status = "failed"
+            db.commit()
 
-        clone = svc.retry_export_job(db, 51, course, failed.id)
+            clone = svc.retry_export_job(db, 51, course, failed.id)
+            # The clone dispatches once; retry must not double-dispatch.
+            assert mock_delay.call_count == 2
+            mock_delay.assert_called_with(clone.id)
         assert clone.id != failed.id
         assert clone.kind == "custom"
         assert clone.params is not None
@@ -286,10 +291,12 @@ def test_retry_export_job_reuses_params_and_rejects_non_failed():
 
         clone.status = "succeeded"
         db.commit()
-        with pytest.raises(HTTPException) as exc:
-            svc.retry_export_job(db, 51, course, clone.id)
+        with patch("app.tasks.export_tasks.run_export_task.delay") as mock_delay:
+            with pytest.raises(HTTPException) as exc:
+                svc.retry_export_job(db, 51, course, clone.id)
         assert exc.value.status_code == 409
         assert _detail_code(exc) == "not_retryable"
+        mock_delay.assert_not_called()
 
 
 def test_run_clarify_wraps_agent_parse_failure_as_retryable_502():

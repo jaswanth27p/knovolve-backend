@@ -9,7 +9,7 @@ from app.auth.dependencies import get_current_user
 from app.db import get_session
 from app.models.user import User
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.schemas.course import ActivityResponse, DashboardResponse, PaginatedTrackedCoursesResponse
+from app.schemas.course import ActivityResponse, DashboardResponse, PaginatedTrackedCoursesResponse, TrackedCourseResponse
 from app.services import tracking
 from app.services import chat as chat_service
 
@@ -33,6 +33,12 @@ def get_my_courses(
         items=items, total=total, page=page, limit=limit,
         total_pages=math.ceil(total / limit) if total else 0,
     )
+
+
+@router.get("/courses/by-slug/{slug}", response_model=TrackedCourseResponse | None)
+def get_my_course_by_slug(slug: str, db: Session = Depends(get_session),
+                          user: User = Depends(get_current_user)):
+    return tracking.get_tracked_course_by_slug(db, user.id, slug)
 
 
 @router.get("/dashboard", response_model=DashboardResponse)

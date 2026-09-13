@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from unittest.mock import patch
 from sqlalchemy import event
 from app.db import SessionLocal, engine
 from app.models.assignment import Assignment
@@ -109,11 +110,28 @@ def test_duplicate_active_run_returns_existing_row():
         from app.models.course import Course as CourseModel
         course = db.get(CourseModel, course_id)
         assert course is not None
-        first, first_action = svc.queue_generation_run(db, 81, course)
-        second, second_action = svc.queue_generation_run(db, 81, course)
+        with patch("app.tasks.course_generation_task.run_course_generation_task.delay"):
+            first, first_action = svc.queue_generation_run(db, 81, course)
+            second, second_action = svc.queue_generation_run(db, 81, course)
         assert first_action == "queued"
         assert second_action == "already_running"
         assert first.id == second.id
+
+
+def test_queue_generation_run_dispatches_worker_only_when_queued():
+    course_id = _seed_planning_course("generation-dispatch")
+    with SessionLocal() as db:
+        from app.models.course import Course as CourseModel
+        course = db.get(CourseModel, course_id)
+        assert course is not None
+        with patch("app.tasks.course_generation_task.run_course_generation_task.delay") as mock_delay:
+            run, action = svc.queue_generation_run(db, 81, course)
+            assert action == "queued"
+            mock_delay.assert_called_once_with(run.id)
+            again, again_action = svc.queue_generation_run(db, 81, course)
+            assert again_action == "already_running"
+            assert again.id == run.id
+            mock_delay.assert_called_once_with(run.id)
 
 
 def test_empty_plan_records_completed_check_run():
@@ -125,10 +143,12 @@ def test_empty_plan_records_completed_check_run():
         db.add(course)
         db.commit()
         db.refresh(course)
-        run, action = svc.queue_generation_run(db, 82, course)
+        with patch("app.tasks.course_generation_task.run_course_generation_task.delay") as mock_delay:
+            run, action = svc.queue_generation_run(db, 82, course)
         assert action == "already_complete"
         assert run.status == "succeeded"
         assert run.total_units == 0
+        mock_delay.assert_not_called()
 
 
 def test_empty_plan_reuses_completed_check_run_idempotently():
@@ -140,8 +160,9 @@ def test_empty_plan_reuses_completed_check_run_idempotently():
         db.add(course)
         db.commit()
         db.refresh(course)
-        first, first_action = svc.queue_generation_run(db, 84, course)
-        second, second_action = svc.queue_generation_run(db, 84, course)
+        with patch("app.tasks.course_generation_task.run_course_generation_task.delay"):
+            first, first_action = svc.queue_generation_run(db, 84, course)
+            second, second_action = svc.queue_generation_run(db, 84, course)
         assert first_action == "already_complete"
         assert second_action == "already_complete"
         assert first.id == second.id
@@ -188,7 +209,8 @@ def test_queue_generation_run_takes_advisory_lock_before_insert():
             from app.models.course import Course as CourseModel
             course = db.get(CourseModel, course_id)
             assert course is not None
-            svc.queue_generation_run(db, 81, course)
+            with patch("app.tasks.course_generation_task.run_course_generation_task.delay"):
+                svc.queue_generation_run(db, 81, course)
     finally:
         event.remove(engine, "before_cursor_execute", _record)
 

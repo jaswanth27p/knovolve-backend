@@ -242,6 +242,12 @@ def queue_generation_run(db: Session, user_id: int, course: Course) -> tuple[Cou
             raise
         return active, "already_running"
     db.refresh(run)
+    # Imported locally because app.tasks.course_generation_task imports this
+    # module; a top-level import would be circular. Dispatch belongs here so
+    # the committed run row and its worker enqueue are never split.
+    from app.tasks.course_generation_task import run_course_generation_task
+
+    run_course_generation_task.delay(run.id)  # pyright: ignore[reportFunctionMemberAccess]
     return run, "queued"
 
 

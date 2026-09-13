@@ -48,12 +48,10 @@ def test_queue_generation_returns_worker_action():
     _make_course("generation-api-course")
     fake_run = SimpleNamespace(id=301, status="pending", total_units=2, completed_units=0,
                                unit_states=[], error=None)
-    with patch("app.services.generation.queue_generation_run", return_value=(fake_run, "queued")), \
-        patch("app.routes.generation.run_course_generation_task.delay") as mock_delay:
+    with patch("app.services.generation.queue_generation_run", return_value=(fake_run, "queued")):
         resp = client.post("/courses/generation-api-course/generate", headers=headers)
     assert resp.status_code == 202
     assert resp.json()["action"] == "queued"
-    mock_delay.assert_called_once_with(301)
 
 
 def test_already_complete_generation_does_not_dispatch_worker():
@@ -61,12 +59,10 @@ def test_already_complete_generation_does_not_dispatch_worker():
     _make_course("generation-complete-course")
     fake_run = SimpleNamespace(id=302, status="succeeded", total_units=0, completed_units=0,
                                unit_states=[], error=None)
-    with patch("app.services.generation.queue_generation_run", return_value=(fake_run, "already_complete")), \
-        patch("app.routes.generation.run_course_generation_task.delay") as mock_delay:
+    with patch("app.services.generation.queue_generation_run", return_value=(fake_run, "already_complete")):
         resp = client.post("/courses/generation-complete-course/generate", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["action"] == "already_complete"
-    mock_delay.assert_not_called()
 
 
 def test_generation_endpoints_require_auth():
@@ -108,7 +104,8 @@ def _seed_pending_run(slug="generation-task-course"):
         _make_module_with_chapters(course_id)
         course = db.get(CourseModel, course_id)
         assert course is not None
-        run, action = generation_service.queue_generation_run(db, 91, course)
+        with patch("app.tasks.course_generation_task.run_course_generation_task.delay"):
+            run, action = generation_service.queue_generation_run(db, 91, course)
         assert action == "queued"
         return run.id
 
@@ -168,3 +165,10 @@ def test_dependency_levels_group_content_before_dependents():
         ["content:1", "content:2"],
         ["chapter_assignment:chapter:1", "module_assignment:9"],
     ]
+
+
+def test_generation_task_soft_limit_leaves_margin_before_hard_kill():
+    """The soft limit must fire before the hard SIGKILL so the task's except
+    block can mark the run failed before the process dies."""
+    assert run_course_generation_task.soft_time_limit > 0  # pyright: ignore[reportFunctionMemberAccess]
+    assert run_course_generation_task.soft_time_limit < run_course_generation_task.time_limit  # pyright: ignore[reportFunctionMemberAccess]

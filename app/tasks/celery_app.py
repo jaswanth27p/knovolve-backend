@@ -2,10 +2,24 @@ import os
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init
 
 from app.config import settings
+from app.db import engine as _db_engine
 from app.observability import instrument_static, setup_logging, setup_tracing
 import app.models  # noqa: F401  (registers every model on Base.metadata before any task runs)
+
+
+@worker_process_init.connect
+def _reset_db_pool_after_fork(**_kwargs: object) -> None:
+    """Drop the connection pool inherited across a prefork fork.
+
+    The engine is built at import time in the parent, so every child inherits
+    the same pooled sockets; two processes sharing one socket corrupts the
+    wire protocol. close=False discards the child's pool without closing the
+    parent's file descriptors, so the child lazily opens fresh connections.
+    """
+    _db_engine.dispose(close=False)
 
 setup_tracing()
 setup_logging()

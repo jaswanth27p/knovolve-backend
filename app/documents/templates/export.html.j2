@@ -53,7 +53,7 @@
 {% if document_kind == "course" %}
 {% for version in chapter.versions %}
 <div class="version">
-<h4>{{ version.label }}{% if version.is_remediation %} — Personalized version{% endif %}</h4>
+<h4>{{ version.label }}</h4>
 {% for section in version.sections %}
 <h4>{{ section.heading }}</h4>
 {{ section.body_html | safe }}

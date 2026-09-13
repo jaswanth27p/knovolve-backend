@@ -35,20 +35,12 @@ def test_export_endpoints_require_auth():
 def test_create_export_queues_worker_and_lists_history():
     headers = _auth_headers("export-api@example.com")
     _make_course("export-api-course")
-    with patch("app.services.exports.create_export_job") as mock_create, \
-        patch("app.routes.exports.run_export_task.delay") as mock_delay, \
+    with patch("app.services.exports.require_export_ready"), \
+        patch("app.tasks.export_tasks.run_export_task.delay") as mock_delay, \
         patch("app.services.exports.list_export_jobs", return_value=[]):
-        mock_create.return_value.id = 101
-        mock_create.return_value.kind = "course"
-        mock_create.return_value.status = "pending"
-        mock_create.return_value.error = None
-        mock_create.return_value.created_at = datetime.now(timezone.utc)
-        mock_create.return_value.completed_at = None
-        mock_create.return_value.result_size = None
         created = client.post("/courses/export-api-course/exports", json={"kind": "course"}, headers=headers)
         assert created.status_code == 202
-        assert created.json()["id"] == 101
-        mock_delay.assert_called_once_with(101)
+        mock_delay.assert_called_once_with(created.json()["id"])
         listed = client.get("/courses/export-api-course/exports", headers=headers)
         assert listed.status_code == 200
         assert listed.json() == []
@@ -80,21 +72,23 @@ def test_download_redirects_only_for_successful_exports():
 
 def test_retry_export_requeues_failed_job_and_dispatches_worker():
     headers = _auth_headers("export-retry@example.com")
-    _make_course("export-retry-course")
+    course_id = _make_course("export-retry-course")
     now = datetime.now(timezone.utc)
-    with patch("app.services.exports.retry_export_job") as mock_retry, \
-        patch("app.routes.exports.run_export_task.delay") as mock_delay:
-        mock_retry.return_value.id = 55
-        mock_retry.return_value.kind = "course"
-        mock_retry.return_value.status = "pending"
-        mock_retry.return_value.error = None
-        mock_retry.return_value.created_at = now
-        mock_retry.return_value.completed_at = None
-        mock_retry.return_value.result_size = None
-        resp = client.post("/courses/export-retry-course/exports/55/retry", headers=headers)
-        assert resp.status_code == 202
-        assert resp.json()["id"] == 55
-        mock_delay.assert_called_once_with(55)
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(email="export-retry@example.com").one()
+        failed = ExportJob(course_id=course_id, user_id=user.id, kind="course", status="failed",
+                           created_at=now, updated_at=now)
+        db.add(failed)
+        db.commit()
+        db.refresh(failed)
+        failed_id = failed.id
+    with patch("app.services.exports.require_export_ready"), \
+        patch("app.tasks.export_tasks.run_export_task.delay") as mock_delay:
+        resp = client.post(f"/courses/export-retry-course/exports/{failed_id}/retry", headers=headers)
+    assert resp.status_code == 202
+    new_id = resp.json()["id"]
+    assert new_id != failed_id
+    mock_delay.assert_called_once_with(new_id)
 
 
 def test_download_url_returns_presigned_json_for_browser_clients():

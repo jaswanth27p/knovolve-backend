@@ -295,6 +295,12 @@ def _create_and_dispatch(db: Session, user_id: int, topic_raw: str,
 
 
 def get_course_job(db: Session, job_id: int, user_id: int | None = None) -> CourseJobResponse:
+    # Deliberately not owner-scoped: normalize_topic's dedup can hand a caller
+    # (and the Learn page's localStorage-tracked job id) a job another user
+    # created, and that caller must be able to poll it after a reload. The job
+    # row exposes only the topic slug and the resulting public course, never
+    # per-user data; the only mutating job action, retry, is owner-checked in
+    # retry_course_job below.
     job = db.get(CourseJob, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
@@ -351,6 +357,13 @@ def retry_course_job(db: Session, job_id: int, user_id: int | None = None) -> Co
     job is in flight, that one is returned."""
     job = db.get(CourseJob, job_id)
     if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    # Retry is a paid, destructive re-queue: only the job's creator (or an
+    # unattributed legacy/queued job) may trigger it. Unattributed jobs
+    # (`created_by_user_id is None`) predate ownership recording. 404 rather
+    # than 403 so another user's job id stays indistinguishable from a
+    # nonexistent one.
+    if user_id is not None and job.created_by_user_id not in (None, user_id):
         raise HTTPException(status_code=404, detail="job not found")
     if job.status == "succeeded":
         course = db.get(Course, job.course_id) if job.course_id else None

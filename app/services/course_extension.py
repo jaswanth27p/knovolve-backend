@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
@@ -73,8 +74,31 @@ def create_extension_job(db: Session, user_id: int, course: Course, message: str
     job = CourseExtensionJob(course_id=course.id, user_id=user_id, request=message,
                              status="pending", created_at=now, updated_at=now)
     db.add(job)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Belt-and-suspenders after the pre-check above: two concurrent
+        # requests can both pass it before either commits, and the partial
+        # unique index on active (course_id, user_id) is the real source of
+        # truth. Roll back, attach to the job that won, and return a clean 409.
+        db.rollback()
+        active = db.scalar(
+            select(CourseExtensionJob).where(
+                CourseExtensionJob.course_id == course.id,
+                CourseExtensionJob.user_id == user_id,
+                CourseExtensionJob.status.in_(["pending", "running"]),
+            )
+        )
+        if active is None:
+            raise
+        raise HTTPException(status_code=409, detail="an extension is already running for this course")
     db.refresh(job)
+    # Local import because app.tasks.course_extension_task imports this module;
+    # a top-level import would be circular. Dispatch lives here so the job row
+    # and its worker enqueue share one owner.
+    from app.tasks.course_extension_task import run_course_extension_job
+
+    run_course_extension_job.delay(job.id)  # pyright: ignore[reportFunctionMemberAccess]
     return job
 
 
