@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import text
+from app.config import settings
 from app.db import SessionLocal
 # Import all models to register them with SQLAlchemy's Base metadata
 from app.models.user import User
@@ -12,6 +13,32 @@ from app.models.assignment import Assignment, AssignmentQuestion
 from app.models.attempt import AssignmentAttempt, AssignmentAnswer
 from app.models.learner_streak import LearnerStreak
 from app.models.export import CourseGenerationRun, ExportJob
+
+
+def _database_name(url: str) -> str:
+    tail = url.rsplit("/", 1)[-1]
+    return tail.split("?", 1)[0]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _refuse_non_test_database():
+    """Hard safety rail: `clean_db` TRUNCATEs every table after each test, so
+    running the suite against the dev database destroys the developer's data.
+    Refuse to run unless the target database name ends in `_test`.
+
+    Run the suite with an explicit test database, e.g.:
+      DATABASE_URL=postgresql+psycopg://knovolve:knovolve@localhost:5432/knovolve_test \\
+        .venv/bin/pytest -q
+    """
+    name = _database_name(settings.database_url)
+    if not name.endswith("_test"):
+        pytest.exit(
+            f"Refusing to run tests against database {name!r}: this suite "
+            "TRUNCATEs all tables. Set DATABASE_URL to a *_test database.",
+            returncode=2,
+        )
+    yield
+
 
 
 class _NullRedis:
@@ -47,18 +74,26 @@ def _chapter_research_off(monkeypatch):
     """Keep the suite hermetic: chapter-content research would otherwise make
     real web calls. Tests for it patch the same symbol themselves."""
     from app.agents.chapter_content import research as chapter_research
-    monkeypatch.setattr(chapter_research, "run_web_research", lambda *args, **kwargs: "")
+    monkeypatch.setattr(chapter_research, "fetch_chapter_research", lambda *args, **kwargs: "")
 
 
 @pytest.fixture(autouse=True)
 def clean_db():
     yield
     with SessionLocal() as s:
-        s.execute(text(
-            "TRUNCATE refresh_tokens, learner_streaks, users, assignment_answers, assignment_attempts, "
-            "assignment_questions, assignment_user_topups, assignments, chapter_content_sections, chapter_contents, "
-            "concept_edges, concepts, chapters, modules, course_jobs, course_extension_jobs, "
-            "export_jobs, course_generation_runs, courses, user_courses, "
-            "checkpoint_writes, checkpoint_blobs, checkpoints RESTART IDENTITY CASCADE"
-        ))
+        # Truncate whatever exists rather than a hardcoded list: the LangGraph
+        # checkpoint tables are created by PostgresSaver.setup() at runtime (not
+        # by migrations), so a freshly-migrated test DB won't have them. Never
+        # touch alembic_version.
+        tables = [
+            row[0]
+            for row in s.execute(
+                text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            )
+            if row[0] != "alembic_version"
+        ]
+        if not tables:
+            return
+        quoted = ", ".join(f'"{name}"' for name in tables)
+        s.execute(text(f"TRUNCATE {quoted} RESTART IDENTITY CASCADE"))
         s.commit()

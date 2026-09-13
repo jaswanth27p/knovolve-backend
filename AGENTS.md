@@ -16,7 +16,7 @@ When pyright surfaces errors: fix ones in files your plan created or touched. Pr
 
 ## Commands
 
-- Tests: `cd backend && OPENCODE_API_KEY=x OPENROUTER_API_KEY=x JWT_SECRET=x .venv/bin/pytest -q` (add `CELERY_TASK_ALWAYS_EAGER=1` for tasks that dispatch Celery work)
+- Tests: `cd backend && OPENCODE_API_KEY=x OPENROUTER_API_KEY=x JWT_SECRET=x DATABASE_URL='postgresql+psycopg://knovolve:knovolve@localhost:5432/knovolve_test' .venv/bin/pytest -q` (add `CELERY_TASK_ALWAYS_EAGER=1` for tasks that dispatch Celery work). **`DATABASE_URL` must point at a `*_test` database** — the suite TRUNCATEs every table after each test and will destroy the dev DB otherwise. `tests/conftest.py` refuses to run against a non-`_test` DB. Bootstrap once: `docker exec backend-postgres-1 createdb -U knovolve knovolve_test` then `DATABASE_URL=...knovolve_test .venv/bin/alembic upgrade head`.
 - Type check: `cd backend && .venv/bin/pyright`
 - Migrations: `cd backend && .venv/bin/alembic revision --autogenerate -m "..."` / `.venv/bin/alembic upgrade head`
 - Infra: `docker compose up -d` (Postgres + Redis + MinIO)
