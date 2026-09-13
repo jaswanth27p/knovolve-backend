@@ -97,15 +97,26 @@ def _tail_pending_diagrams(db: Session, chapter_content_id: int,
 def stream_content_events(chapter: Chapter, db: Session, user_id: int) -> Iterator[dict]:
     pending_orders: set[int] = set()
     terminal: dict | None = None
+    saw_generating = False
     for event in stream_chapter_content(chapter, db, user_id):
         if event["type"] in ("done", "error"):
             # Hold the terminal event until after any pending-diagram tail so
             # the stream emits exactly one terminal ("done"|"error").
             terminal = event
             break
+        if event["type"] == "generating":
+            # The underlying generator emits `generating` then `done` when a
+            # V2+ remediation is still being authored in the background. That
+            # `done` only terminates this HTTP stream — it does NOT mean the
+            # content is ready, so it must not reach the client as a terminal
+            # completion (the client would show the assignment button early).
+            saw_generating = True
         yield event
         if event["type"] == "section_ready" and event["diagram_status"] == "pending":
             pending_orders.add(event["order"])
+
+    if saw_generating:
+        return
 
     if pending_orders and terminal and terminal["type"] == "done":
         # Only tail on a clean finish. If generation errored, the chapter is

@@ -53,6 +53,23 @@ def test_content_endpoint_streams_ndjson_events():
     assert events[-1]["type"] == "done"
 
 
+def test_content_endpoint_generating_is_not_a_terminal_done():
+    """A V2+ remediation in progress yields `generating` + `done` from the
+    underlying generator. The wrapper must not forward that `done` as if the
+    chapter were finished, or the client shows the assignment button early."""
+    token = _register_and_login("chapters-api-generating@example.com")
+    slug, chapter_id = _make_chapter("chapters-api-generating")
+
+    with patch("app.services.chapter_content.stream_chapter_content",
+               return_value=iter([{"type": "generating"}, {"type": "done"}])):
+        resp = client.get(f"/courses/{slug}/chapters/{chapter_id}/content",
+                          headers={"Authorization": f"Bearer {token}"})
+
+    events = _events(resp)
+    assert [e["type"] for e in events] == ["generating"]
+    assert not any(e["type"] == "done" for e in events)
+
+
 def test_content_endpoint_404_for_chapter_not_in_course():
     token = _register_and_login("chapters-api-b@example.com")
     slug, _ = _make_chapter("chapters-api-mismatch-a")
