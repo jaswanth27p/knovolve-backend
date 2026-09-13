@@ -54,9 +54,16 @@ def test_login_wrong_password_rejected():
 
 def test_duplicate_register_rejected():
     client.cookies.clear()
-    client.post("/auth/register", json={"email": "c@example.com", "password": "x"})
-    resp = client.post("/auth/register", json={"email": "c@example.com", "password": "y"})
+    client.post("/auth/register", json={"email": "c@example.com", "password": "password1"})
+    resp = client.post("/auth/register", json={"email": "c@example.com", "password": "password2"})
     assert resp.status_code == 409
+
+
+def test_short_or_empty_password_register_rejected():
+    client.cookies.clear()
+    for bad in ("", "short"):
+        resp = client.post("/auth/register", json={"email": f"bad-{len(bad)}@example.com", "password": bad})
+        assert resp.status_code == 422
 
 
 def test_login_nonexistent_user_rejected():
@@ -98,7 +105,7 @@ def test_register_race_condition_returns_409_not_500():
 
     app.dependency_overrides[get_session] = fake_get_session
     try:
-        resp = client.post("/auth/register", json={"email": "race@example.com", "password": "y"})
+        resp = client.post("/auth/register", json={"email": "race@example.com", "password": "password2"})
     finally:
         app.dependency_overrides.pop(get_session, None)
 

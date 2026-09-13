@@ -1,9 +1,11 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
+    # Minimum length is enforced here so an empty/short password can't create
+    # an account (the DB column has no such constraint).
+    password: str = Field(min_length=8, max_length=1024)
 
 
 class LoginRequest(BaseModel):
