@@ -39,6 +39,7 @@ celery_app.conf.include = [
     "app.tasks.auth_tasks",
     "app.tasks.export_tasks",
     "app.tasks.course_generation_task",
+    "app.tasks.job_reconciliation_tasks",
 ]
 
 # Periodic hygiene: revoked/expired refresh_tokens rows otherwise accumulate
@@ -50,6 +51,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.auth_tasks.purge_expired_refresh_tokens_task",
         "schedule": crontab(hour=3, minute=0),
     },
+    # Backstop for jobs no per-task time limit can catch: one purged from the
+    # queue or revoked before any worker picked it up. Runs often (user-facing
+    # "is it done yet?" polling, unlike the once-a-day token purge above) so a
+    # stuck job fails visibly within minutes, not indefinitely.
+    "reconcile-stuck-generation-jobs": {
+        "task": "app.tasks.job_reconciliation_tasks.reconcile_stuck_jobs_task",
+        "schedule": 300.0,
+    },
 }
 
 # Crash-resumability: ack the message only after the task body finishes, so a
@@ -60,6 +69,15 @@ celery_app.conf.beat_schedule = {
 celery_app.conf.update(
     task_acks_late=True,
     task_time_limit=settings.celery_task_time_limit_seconds,
+    task_soft_time_limit=settings.celery_task_soft_time_limit_seconds,
+    # A worker killed outright (OOM, container restart, manual kill, or the
+    # hard time limit above) would otherwise leave its message invisible for
+    # the full visibility_timeout (6h) before redelivery — during which the
+    # job's DB row just sits "running" with nothing to explain why. Rejecting
+    # on worker-lost requeues it immediately instead. Every task here is
+    # written to tolerate a redelivery safely (idempotent get-or-create,
+    # status guards, or checkpoint-resume), so immediate requeue is safe.
+    task_reject_on_worker_lost=True,
     broker_transport_options={
         "visibility_timeout": settings.celery_visibility_timeout_seconds
     },

@@ -56,11 +56,32 @@ class Settings(BaseSettings):
     # Celery broker: how long a crashed worker's message stays invisible before
     # redelivery. Must comfortably exceed the longest single graph run.
     celery_visibility_timeout_seconds: int = 6 * 60 * 60
-    # Hard cap on a single task run (the whole graph). A non-returning LLM call
-    # cannot be rescued by tenacity, so the worker must eventually kill the
-    # task; acks_late then redelivers it and the run resumes from its last
-    # checkpoint instead of starting over.
+    # Hard cap on a single task run for every task that does not set its own
+    # time_limit/soft_time_limit (most tasks below do not — see
+    # celery_course_creation_time_limit_seconds and
+    # celery_generation_run_time_limit_seconds for the two that do). A
+    # non-returning LLM call cannot be rescued by tenacity, so the worker must
+    # eventually kill the task; acks_late then redelivers it and the run
+    # resumes from its last checkpoint instead of starting over.
     celery_task_time_limit_seconds: int = 30 * 60
+    # Global soft limit paired with celery_task_time_limit_seconds above.
+    # Without a soft limit, Celery's hard limit sends SIGKILL directly with no
+    # in-process exception at all — a task's own `except Exception` (which
+    # would otherwise mark its job/row "failed") never runs, so a run that
+    # overruns silently leaves its DB row stuck "running"/"pending" forever
+    # instead of failing loudly. 90% of the hard cap leaves a 3-minute margin
+    # at the default 30 minutes for the except block's own DB commit to land
+    # before the hard SIGKILL. Keep strictly below the hard cap.
+    celery_task_soft_time_limit_seconds: int = 30 * 60 * 90 // 100
+    # Course creation (Learn page: outline -> chapters -> concept graph ->
+    # persist) is the same class of full LLM-pipeline work as full-course
+    # generation below and gets its own equally generous budget instead of the
+    # generic 30-minute default, which real runs can legitimately exceed.
+    # Checkpointed, so a timeout-triggered retry (see course_creation_task.py)
+    # resumes rather than restarting.
+    celery_course_creation_time_limit_seconds: int = 2 * 60 * 60
+    # Same 95%-of-hard-cap margin rationale as celery_generation_run_soft_time_limit_seconds.
+    celery_course_creation_soft_time_limit_seconds: int = 2 * 60 * 60 * 95 // 100
     # Per-call timeout for every LLM/embedding request, so a hung provider call
     # fails (and retries/backoff) instead of blocking the graph indefinitely.
     llm_request_timeout_seconds: float = 120.0

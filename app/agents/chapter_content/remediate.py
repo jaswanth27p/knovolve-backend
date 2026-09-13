@@ -132,6 +132,10 @@ def remediate_chapter(
         content.updated_at = datetime.now(timezone.utc)
         db.commit()
     except Exception as exc:
+        # Also catches celery.exceptions.SoftTimeLimitExceeded via the global
+        # task_soft_time_limit (celery_app.py; remediate_chapter_task sets no
+        # override), so a hung remediation call gets flagged failed instead of
+        # surviving to the hard kill with no exception raised.
         db.rollback()
         content.status = "failed"
         content.error = str(exc)

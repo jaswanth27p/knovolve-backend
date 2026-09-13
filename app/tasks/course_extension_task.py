@@ -51,6 +51,11 @@ def run_course_extension_job(self: Task, job_id: int) -> None:
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as exc:  # noqa: BLE001 - terminal, generic error surfaced
+            # Also catches celery.exceptions.SoftTimeLimitExceeded, raised here
+            # via the global task_soft_time_limit (celery_app.py) since this
+            # task sets no override of its own -- an overrunning "short" plan
+            # still gets flagged failed instead of surviving to the hard kill
+            # with no exception ever reaching this block.
             db.rollback()
             logger.error("extension job %s failed", job_id, exc_info=exc)
             job.status = "failed"

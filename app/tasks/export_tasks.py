@@ -69,6 +69,10 @@ def run_export_task(self: Task, export_id: int) -> None:
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as exc:
+            # Also catches celery.exceptions.SoftTimeLimitExceeded via the
+            # global task_soft_time_limit (celery_app.py; this task sets no
+            # override), so a hung custom-export LLM call gets flagged failed
+            # instead of surviving to the hard kill with no exception raised.
             db.rollback()
             logger.error("export job %s failed", export_id, exc_info=exc)
             job.status = "failed"

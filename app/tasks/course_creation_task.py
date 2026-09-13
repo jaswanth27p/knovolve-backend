@@ -130,7 +130,11 @@ def _finalize_failed(db, job: CourseJob, exc: BaseException) -> None:
     db.commit()
 
 
-@celery_app.task(bind=True, max_retries=MAX_CELERY_RETRIES, default_retry_delay=5)
+@celery_app.task(
+    bind=True, max_retries=MAX_CELERY_RETRIES, default_retry_delay=5,
+    time_limit=settings.celery_course_creation_time_limit_seconds,
+    soft_time_limit=settings.celery_course_creation_soft_time_limit_seconds,
+)
 def run_course_creation_job(self: Task, job_id: int) -> None:
     with SessionLocal() as db:
         job = db.get(CourseJob, job_id)
@@ -192,7 +196,12 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
             _finalize_failed(db, job, exc)
             return
         except Exception as exc:
-            # Transient infra error that escaped the tenacity layer. Under a
+            # Transient infra error that escaped the tenacity layer -- this also
+            # catches celery.exceptions.SoftTimeLimitExceeded (a plain Exception
+            # subclass), raised in-process just before the hard time_limit kill
+            # configured on this task's decorator. Retrying a timeout is safe
+            # specifically because this graph is checkpointed: the next attempt
+            # resumes via _invoke_generation instead of starting over. Under a
             # direct call (tests / no broker) retry() re-raises `exc`; under a
             # worker it re-queues and raises Retry. Either way control does not
             # fall through to marking the job succeeded.
