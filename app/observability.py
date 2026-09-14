@@ -199,7 +199,12 @@ def instrument_fastapi(app) -> None:
         return
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-    FastAPIInstrumentor.instrument_app(app)
+    # Same probe endpoints as _AccessLogNoiseFilter above, so a health check
+    # or metrics scrape doesn't also spam Tempo with a span every 10-15s.
+    # excluded_urls is matched as a regex against the full request URL, so
+    # this also needs no other route to contain "/health" or "/metrics" as a
+    # substring -- true today, worth rechecking if that ever changes.
+    FastAPIInstrumentor.instrument_app(app, excluded_urls=",".join(_NOISY_ACCESS_PATHS))
 
 
 def instrument_static() -> None:
