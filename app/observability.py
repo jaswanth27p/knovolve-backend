@@ -102,9 +102,22 @@ class _AccessLogNoiseFilter(logging.Filter):
         return True
 
 
-def setup_logging() -> None:
+_otlp_handler: "OTLPLoggingHandler | None" = None
+
+
+def _get_or_create_otlp_handler() -> "OTLPLoggingHandler | None":
+    """Build (once) and return the process-wide OTLP logging handler.
+
+    Cached at module scope so every caller -- setup_logging() itself, and
+    the celery after_setup_logger/after_setup_task_logger signal handlers in
+    app/tasks/celery_app.py -- shares one LoggerProvider/exporter instead of
+    opening a duplicate OTLP connection per logger bridged.
+    """
+    global _otlp_handler
     if not otel_enabled():
-        return
+        return None
+    if _otlp_handler is not None:
+        return _otlp_handler
     import logging as _logging
 
     from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -121,25 +134,64 @@ def setup_logging() -> None:
     )
     provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{_otlp_base()}/v1/logs")))
     level = getattr(_logging, settings.otel_log_level.upper(), _logging.INFO)
+    _otlp_handler = OTLPLoggingHandler(level=level, provider=provider)
+    return _otlp_handler
+
+
+def attach_otlp_handler(logger: logging.Logger) -> None:
+    """Attach the shared OTLP handler to `logger`. No-op if OTel is disabled.
+
+    Celery reconfigures its own logger tree (root included, unless
+    worker_hijack_root_logger=False) during worker/beat bootstrap, which runs
+    well *after* this module is imported -- so a handler attached at import
+    time gets silently dropped. Call this from celery's after_setup_logger /
+    after_setup_task_logger signals instead, which fire once Celery is done,
+    so the bridge actually survives.
+    """
+    handler = _get_or_create_otlp_handler()
+    if handler is not None and not any(isinstance(h, OTLPLoggingHandler) for h in logger.handlers):
+        logger.addHandler(handler)
+
+
+def setup_logging() -> None:
+    if not otel_enabled():
+        return
+    import logging as _logging
+
+    handler = _get_or_create_otlp_handler()
+    assert handler is not None
     root = _logging.getLogger()
     # Python's root logger defaults to WARNING, which would drop INFO records
     # before OTLP export. Lift it so the configured level reaches handlers.
-    root.setLevel(level)
-    handler = OTLPLoggingHandler(level=level, provider=provider)
+    root.setLevel(handler.level)
     # Don't double-attach if setup is called again in-process (uvicorn reload).
     if not any(isinstance(h, OTLPLoggingHandler) for h in root.handlers):
         root.addHandler(handler)
-    # uvicorn and celery configure their loggers with propagate=False, so root
-    # never sees them. Attach the same bridge directly so request/access lines
-    # and celery task logs reach OTLP too.
-    for name in ("uvicorn", "uvicorn.access", "uvicorn.error", "celery", "celery.task"):
-        lgr = _logging.getLogger(name)
-        if not any(isinstance(h, OTLPLoggingHandler) for h in lgr.handlers):
-            lgr.addHandler(handler)
+    # uvicorn configures its loggers with propagate=False, so root never sees
+    # them. Attach the same bridge directly so request/access lines reach
+    # OTLP too. Celery's loggers are bridged separately via the
+    # after_setup_logger/after_setup_task_logger signals in celery_app.py --
+    # see attach_otlp_handler()'s docstring for why they can't be attached
+    # here at import time.
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        attach_otlp_handler(_logging.getLogger(name))
 
     access_logger = _logging.getLogger("uvicorn.access")
     if not any(isinstance(f, _AccessLogNoiseFilter) for f in access_logger.filters):
         access_logger.addFilter(_AccessLogNoiseFilter())
+
+    # warnings.warn() (e.g. PyJWT's InsecureKeyLengthWarning, celery's
+    # SecurityWarning about running as root) goes straight to stderr via the
+    # warnings module by default, bypassing logging entirely. Route it
+    # through the "py.warnings" logger instead so it reaches OTLP too.
+    _logging.captureWarnings(True)
+    warnings_logger = _logging.getLogger("py.warnings")
+    attach_otlp_handler(warnings_logger)
+    # Unlike uvicorn's loggers (which set propagate=False themselves),
+    # py.warnings defaults to propagate=True -- without this it would also
+    # hit root's copy of the same handler on the way up, double-emitting
+    # every captured warning.
+    warnings_logger.propagate = False
 
 
 def instrument_fastapi(app) -> None:

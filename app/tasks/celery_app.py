@@ -2,11 +2,11 @@ import os
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_process_init
+from celery.signals import after_setup_logger, after_setup_task_logger, worker_process_init
 
 from app.config import settings
 from app.db import engine as _db_engine
-from app.observability import instrument_static, setup_logging, setup_tracing
+from app.observability import attach_otlp_handler, instrument_static, setup_logging, setup_tracing
 import app.models  # noqa: F401  (registers every model on Base.metadata before any task runs)
 
 
@@ -20,6 +20,19 @@ def _reset_db_pool_after_fork(**_kwargs: object) -> None:
     parent's file descriptors, so the child lazily opens fresh connections.
     """
     _db_engine.dispose(close=False)
+
+
+@after_setup_logger.connect
+@after_setup_task_logger.connect
+def _bridge_celery_logger_to_otlp(logger=None, **_kwargs: object) -> None:
+    """Re-attach the OTLP handler after Celery finishes its own logging
+    setup. Celery reconfigures its logger tree during worker/beat bootstrap,
+    which runs after this module (and setup_logging()) is imported, so a
+    handler attached earlier gets silently dropped -- these signals are
+    Celery's documented extension point for adding handlers that stick.
+    """
+    if logger is not None:
+        attach_otlp_handler(logger)
 
 setup_tracing()
 setup_logging()
