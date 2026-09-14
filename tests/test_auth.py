@@ -71,6 +71,30 @@ def test_login_nonexistent_user_rejected():
     assert resp.status_code == 401
 
 
+def test_register_email_case_insensitive_duplicate_rejected():
+    client.cookies.clear()
+    client.post("/auth/register", json={"email": "Case@Example.com", "password": "password1"})
+    resp = client.post("/auth/register", json={"email": "case@example.com", "password": "password2"})
+    assert resp.status_code == 409
+
+
+def test_login_email_case_insensitive():
+    client.cookies.clear()
+    resp = client.post("/auth/register", json={"email": "MixedCase@Example.com", "password": "hunter22"})
+    assert resp.status_code == 201
+    client.cookies.clear()
+    resp = client.post("/auth/login", json={"email": "mixedcase@example.com", "password": "hunter22"})
+    assert resp.status_code == 200
+
+
+def test_register_stores_email_lowercased():
+    client.cookies.clear()
+    client.post("/auth/register", json={"email": "StoredLower@Example.com", "password": "hunter22"})
+    with SessionLocal() as s:
+        user = s.query(User).filter(User.email == "storedlower@example.com").one()
+        assert user.email == "storedlower@example.com"
+
+
 class _AlwaysMissSession:
     """Wraps a real Session but forces .scalar() to always return None,
     simulating the TOCTOU window in register(): the pre-check SELECT finds

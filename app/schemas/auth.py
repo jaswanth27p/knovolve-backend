@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class RegisterRequest(BaseModel):
@@ -7,10 +7,26 @@ class RegisterRequest(BaseModel):
     # an account (the DB column has no such constraint).
     password: str = Field(min_length=8, max_length=1024)
 
+    # Emails are case-insensitive per RFC 5321/5322 convention and every real
+    # mail provider treats them that way. The users.email column is a plain
+    # case-sensitive unique index, so without normalizing here "A@x.com" and
+    # "a@x.com" would register as two different accounts, and a user who
+    # logs in with different casing than they registered with gets a
+    # confusing "invalid credentials" instead of being recognized.
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class AuthResponse(BaseModel):
