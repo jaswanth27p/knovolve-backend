@@ -117,17 +117,21 @@ def _invoke_generation(graph, initial_state: CourseCreationState, config: Runnab
     return graph.invoke(initial_state, config=config, durability="sync")
 
 
-def _finalize_failed(db, job: CourseJob, exc: BaseException) -> None:
+def _finalize_failed(job_id: int, exc: BaseException) -> None:
     """Log full detail; persist only a generic message on the job row."""
     logger.error(
         "course job %s failed terminally (status remains observable as failed)",
-        job.id,
+        job_id,
         exc_info=exc,
     )
-    job.status = "failed"
-    job.error = GENERIC_JOB_ERROR
-    job.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    with SessionLocal() as db:
+        job = db.get(CourseJob, job_id)
+        if job is None:
+            return
+        job.status = "failed"
+        job.error = GENERIC_JOB_ERROR
+        job.updated_at = datetime.now(timezone.utc)
+        db.commit()
 
 
 @celery_app.task(
@@ -136,6 +140,12 @@ def _finalize_failed(db, job: CourseJob, exc: BaseException) -> None:
     soft_time_limit=settings.celery_course_creation_soft_time_limit_seconds,
 )
 def run_course_creation_job(self: Task, job_id: int) -> None:
+    # Each DB session below is scoped narrowly (open, write, close) rather
+    # than held open across the graph invocation. The graph can run for many
+    # minutes on LLM/web calls; a session left open that whole time is at
+    # best a wasted connection and at worst a self-deadlock — it previously
+    # did exactly that against the checkpointer's one-time schema setup (see
+    # app/agents/course_creation/checkpointer.py).
     with SessionLocal() as db:
         job = db.get(CourseJob, job_id)
         if job is None:
@@ -164,8 +174,12 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
 
         job.status = "running"
         job.updated_at = datetime.now(timezone.utc)
-        db.commit()
 
+        # Read every job field the graph needs before commit: SQLAlchemy
+        # expires ORM attributes on commit by default, and touching them
+        # afterward would silently re-open a transaction on this same session
+        # — which previously stayed open (unnoticed) for the graph's whole
+        # multi-minute run.
         initial_state: CourseCreationState = {
             "job_id": job_id,
             "topic_raw": job.topic_raw,
@@ -182,45 +196,51 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
             # the requested course is built instead of re-merged.
             initial_state["allow_duplicate"] = True
 
-        try:
-            graph = build_course_creation_graph()
-            final_state = _invoke_generation(
-                graph,
-                initial_state,
-                {"configurable": {"thread_id": str(job_id)}},
-                job_id,
-            )
-        except CourseGenerationError as exc:
-            # Content that exhausted its in-graph repair budget, or a persist
-            # defect. Regenerating would reproduce the same failure.
-            _finalize_failed(db, job, exc)
-            return
-        except Exception as exc:
-            # Transient infra error that escaped the tenacity layer -- this also
-            # catches celery.exceptions.SoftTimeLimitExceeded (a plain Exception
-            # subclass), raised in-process just before the hard time_limit kill
-            # configured on this task's decorator. Retrying a timeout is safe
-            # specifically because this graph is checkpointed: the next attempt
-            # resumes via _invoke_generation instead of starting over. Under a
-            # direct call (tests / no broker) retry() re-raises `exc`; under a
-            # worker it re-queues and raises Retry. Either way control does not
-            # fall through to marking the job succeeded.
-            logger.warning(
-                "course job %s hit transient failure, retry #%s",
-                job_id,
-                self.request.retries + 1,
-                exc_info=True,
-            )
-            try:
-                self.retry(
-                    exc=exc,
-                    countdown=_transient_retry_delay_seconds(self),
-                    max_retries=MAX_CELERY_RETRIES,
-                )
-            except MaxRetriesExceededError:
-                _finalize_failed(db, job, exc)
-            return
+        db.commit()
 
+    try:
+        graph = build_course_creation_graph()
+        final_state = _invoke_generation(
+            graph,
+            initial_state,
+            {"configurable": {"thread_id": str(job_id)}},
+            job_id,
+        )
+    except CourseGenerationError as exc:
+        # Content that exhausted its in-graph repair budget, or a persist
+        # defect. Regenerating would reproduce the same failure.
+        _finalize_failed(job_id, exc)
+        return
+    except Exception as exc:
+        # Transient infra error that escaped the tenacity layer -- this also
+        # catches celery.exceptions.SoftTimeLimitExceeded (a plain Exception
+        # subclass), raised in-process just before the hard time_limit kill
+        # configured on this task's decorator. Retrying a timeout is safe
+        # specifically because this graph is checkpointed: the next attempt
+        # resumes via _invoke_generation instead of starting over. Under a
+        # direct call (tests / no broker) retry() re-raises `exc`; under a
+        # worker it re-queues and raises Retry. Either way control does not
+        # fall through to marking the job succeeded.
+        logger.warning(
+            "course job %s hit transient failure, retry #%s",
+            job_id,
+            self.request.retries + 1,
+            exc_info=True,
+        )
+        try:
+            self.retry(
+                exc=exc,
+                countdown=_transient_retry_delay_seconds(self),
+                max_retries=MAX_CELERY_RETRIES,
+            )
+        except MaxRetriesExceededError:
+            _finalize_failed(job_id, exc)
+        return
+
+    with SessionLocal() as db:
+        job = db.get(CourseJob, job_id)
+        if job is None:
+            raise ValueError(f"CourseJob {job_id} not found")
         job.status = "succeeded"
         job.course_id = final_state["existing_course_id"]
         job.updated_at = datetime.now(timezone.utc)
