@@ -86,6 +86,22 @@ class OTLPLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
+_NOISY_ACCESS_PATHS = ("/health", "/metrics")
+
+
+class _AccessLogNoiseFilter(logging.Filter):
+    """Drop uvicorn access-log lines for high-frequency probe endpoints
+    (health checks, metrics scrapes) so they don't flood Loki."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            path = str(args[2])
+            if any(path == p or path.startswith(f"{p}?") for p in _NOISY_ACCESS_PATHS):
+                return False
+        return True
+
+
 def setup_logging() -> None:
     if not otel_enabled():
         return
@@ -120,6 +136,10 @@ def setup_logging() -> None:
         lgr = _logging.getLogger(name)
         if not any(isinstance(h, OTLPLoggingHandler) for h in lgr.handlers):
             lgr.addHandler(handler)
+
+    access_logger = _logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessLogNoiseFilter) for f in access_logger.filters):
+        access_logger.addFilter(_AccessLogNoiseFilter())
 
 
 def instrument_fastapi(app) -> None:
