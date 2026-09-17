@@ -18,6 +18,13 @@ class AttemptSubmitResponse(BaseModel):
 
 class AnswerResult(BaseModel):
     question_id: int
+    type: str
+    text: str
+    options: list[str] | None
+    user_answer: str
+    correct_answer: str
+    explanation: str
+    concept_tag: str
     is_correct: bool
     feedback: str
 

@@ -236,7 +236,94 @@ def test_get_attempt_returns_graded_result_with_concept_breakdown():
     assert body["overall_score"] == 1.0
     assert len(body["answers"]) == 1
     assert body["answers"][0]["is_correct"] is True
+    assert body["answers"][0]["type"] == "mcq"
+    assert body["answers"][0]["text"] == "q0"
+    assert body["answers"][0]["options"] == ["a", "b"]
+    assert body["answers"][0]["user_answer"] == "a"
+    assert body["answers"][0]["correct_answer"] == "a"
+    assert body["answers"][0]["explanation"] == "e"
+    assert body["answers"][0]["concept_tag"] == "t"
     assert body["concept_scores"] == [{"concept_tag": "t", "correct": 1, "total": 1}]
+
+
+def test_get_attempt_exposes_question_and_answer_review_fields_for_all_types():
+    """The results UI needs the question text, options, the learner's own
+    answer, the correct answer and the explanation to render a review — for
+    mcq/true_false (options) and free_text (no options) alike."""
+    headers = _auth_headers("att-api-review@example.com")
+    slug = "att-api-review"
+    with SessionLocal() as db:
+        course = Course(topic_slug=slug, topic_raw=slug, topic_embedding=[0.0] * 2048, created_at=_now())
+        db.add(course)
+        db.commit()
+        module = Module(course_id=course.id, title="M", objective="o", order=1)
+        db.add(module)
+        db.commit()
+        chapter = Chapter(module_id=module.id, title="C", objective="o", order=1)
+        db.add(chapter)
+        db.commit()
+        content = ChapterContent(chapter_id=chapter.id, version=1, scope="global", status="ready",
+                                  outline=[], created_at=_now(), updated_at=_now())
+        db.add(content)
+        db.commit()
+        assignment = Assignment(level="chapter", chapter_content_id=content.id, scope="global",
+                                 status="ready", created_at=_now(), updated_at=_now())
+        db.add(assignment)
+        db.commit()
+        questions = [
+            AssignmentQuestion(assignment_id=assignment.id, order=0, type="mcq", text="mcq q",
+                               options=["a", "b"], correct_answer="a", explanation="mcq why",
+                               concept_tag="t-mcq", difficulty="easy"),
+            AssignmentQuestion(assignment_id=assignment.id, order=1, type="true_false", text="tf q",
+                               options=None, correct_answer="true", explanation="tf why",
+                               concept_tag="t-tf", difficulty="easy"),
+            AssignmentQuestion(assignment_id=assignment.id, order=2, type="free_text", text="ft q",
+                               options=None, correct_answer="Paris", explanation="ft why",
+                               concept_tag="t-ft", difficulty="easy"),
+        ]
+        db.add_all(questions)
+        db.commit()
+        assignment_id = assignment.id
+        qids = [q.id for q in questions]
+
+    def _fake_grade(attempt_id):
+        with SessionLocal() as db:
+            attempt = db.get(AssignmentAttempt, attempt_id)
+            assert attempt is not None
+            for a in db.query(AssignmentAnswer).filter_by(attempt_id=attempt_id).all():
+                a.is_correct = False
+                a.feedback = "nope"
+                a.graded_at = _now()
+            attempt.status = "graded"
+            attempt.overall_score = 0.0
+            db.commit()
+
+    with patch("app.services.attempts.grade_assignment_attempt_task") as mock_task:
+        mock_task.delay.side_effect = _fake_grade
+        submit_resp = client.post(
+            f"/courses/{slug}/assignments/{assignment_id}/attempts",
+            json={"answers": [
+                {"question_id": qids[0], "answer": "b"},
+                {"question_id": qids[1], "answer": "false"},
+                {"question_id": qids[2], "answer": "London"},
+            ]},
+            headers=headers,
+        )
+    attempt_id = submit_resp.json()["attempt_id"]
+
+    resp = client.get(f"/courses/{slug}/assignments/{assignment_id}/attempts/{attempt_id}", headers=headers)
+    assert resp.status_code == 200
+    answers = {a["question_id"]: a for a in resp.json()["answers"]}
+    mcq = answers[qids[0]]
+    assert (mcq["type"], mcq["text"], mcq["options"], mcq["user_answer"], mcq["correct_answer"]) == \
+        ("mcq", "mcq q", ["a", "b"], "b", "a")
+    assert mcq["explanation"] == "mcq why"
+    tf = answers[qids[1]]
+    assert (tf["type"], tf["options"], tf["user_answer"], tf["correct_answer"]) == ("true_false", None, "false", "true")
+    ft = answers[qids[2]]
+    assert (ft["type"], ft["options"], ft["user_answer"], ft["correct_answer"], ft["explanation"]) == \
+        ("free_text", None, "London", "Paris", "ft why")
+
 
 
 def test_get_attempt_failed_status_does_not_auto_retry():

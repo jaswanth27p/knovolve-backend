@@ -82,6 +82,13 @@ def _serialize_attempt(attempt: AssignmentAttempt, assignment: Assignment, db: S
             (AssignmentQuestion.user_id.is_(None)) | (AssignmentQuestion.user_id == user_id),
         )
     ).all()
+    questions_by_id = {
+        q.id: q for q in db.scalars(
+            select(AssignmentQuestion).where(
+                AssignmentQuestion.id.in_([a.question_id for a in answers])
+            )
+        ).all()
+    }
     concept_totals: dict[str, list[int]] = {}
     for a in answers:
         totals = concept_totals.setdefault(a.concept_tag, [0, 0])
@@ -99,13 +106,26 @@ def _serialize_attempt(attempt: AssignmentAttempt, assignment: Assignment, db: S
             if passed:
                 next_chapter_id = courses.get_next_chapter_id(db, chapter_id, user_id)
 
+    answer_results: list[AnswerResult] = []
+    for a in answers:
+        question = questions_by_id[a.question_id]
+        answer_results.append(AnswerResult(
+            question_id=a.question_id,
+            type=question.type,
+            text=question.text,
+            options=question.options,
+            user_answer=a.user_answer,
+            correct_answer=question.correct_answer,
+            explanation=question.explanation,
+            concept_tag=question.concept_tag,
+            is_correct=bool(a.is_correct),
+            feedback=a.feedback or "",
+        ))
+
     return AttemptResponse(
         status="graded",
         overall_score=attempt.overall_score,
-        answers=[
-            AnswerResult(question_id=a.question_id, is_correct=bool(a.is_correct), feedback=a.feedback or "")
-            for a in answers
-        ],
+        answers=answer_results,
         concept_scores=[
             ConceptScore(concept_tag=tag, correct=c, total=t) for tag, (c, t) in concept_totals.items()
         ],
