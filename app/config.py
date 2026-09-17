@@ -165,6 +165,14 @@ class Settings(BaseSettings):
     # Sentry (self-hosted) DSN; empty string disables error tracking.
     sentry_dsn: str = ""
     sentry_traces_sample_rate: float = 0.1
+    # Langfuse (self-hosted, docker-compose service `langfuse-web`). Mirrors
+    # otel_enabled's shape: off by default, no required env vars in existing
+    # dev setups.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://localhost:3400"
+    langfuse_tracing_environment: str = "development"
     # MinIO/S3-compatible object storage for diagram images.
     s3_endpoint: str = "http://localhost:9000"
     s3_public_endpoint: str = "http://localhost:9000"
@@ -178,6 +186,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 # pydantic-settings sources required fields (jwt_secret, opencode_api_key,
