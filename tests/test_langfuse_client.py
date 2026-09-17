@@ -2,6 +2,7 @@ import contextvars
 
 from app.config import settings
 from app.llm.langfuse_client import (
+    flush_langfuse,
     get_langfuse_handler,
     run_with_current_context,
     traced_workflow,
@@ -11,6 +12,11 @@ from app.llm.langfuse_client import (
 def test_handler_none_when_disabled(monkeypatch):
     monkeypatch.setattr(settings, "langfuse_enabled", False)
     assert get_langfuse_handler() is None
+
+
+def test_flush_langfuse_is_noop_when_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "langfuse_enabled", False)
+    flush_langfuse()  # must not raise, must not import langfuse
 
 
 def test_traced_workflow_is_noop_when_disabled(monkeypatch):

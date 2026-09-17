@@ -36,6 +36,7 @@ from app.agents.course_creation.graph import (
 from app.agents.course_creation.state import CourseCreationState
 from app.config import settings
 from app.db import SessionLocal
+from app.llm.langfuse_client import flush_langfuse, traced_workflow
 from app.models.course import CourseJob
 from app.tasks.celery_app import celery_app
 
@@ -196,16 +197,20 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
             # the requested course is built instead of re-merged.
             initial_state["allow_duplicate"] = True
 
+        created_by_user_id = job.created_by_user_id
         db.commit()
 
     try:
-        graph = build_course_creation_graph()
-        final_state = _invoke_generation(
-            graph,
-            initial_state,
-            {"configurable": {"thread_id": str(job_id)}},
-            job_id,
-        )
+        with traced_workflow(
+            "Course Creation", user_id=created_by_user_id, session_id=job_id, tags=["course-creation"],
+        ):
+            graph = build_course_creation_graph()
+            final_state = _invoke_generation(
+                graph,
+                initial_state,
+                {"configurable": {"thread_id": str(job_id)}},
+                job_id,
+            )
     except CourseGenerationError as exc:
         # Content that exhausted its in-graph repair budget, or a persist
         # defect. Regenerating would reproduce the same failure.
@@ -236,6 +241,8 @@ def run_course_creation_job(self: Task, job_id: int) -> None:
         except MaxRetriesExceededError:
             _finalize_failed(job_id, exc)
         return
+    finally:
+        flush_langfuse()
 
     with SessionLocal() as db:
         job = db.get(CourseJob, job_id)

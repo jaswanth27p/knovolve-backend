@@ -49,6 +49,23 @@ def get_langfuse_handler():
     return _handler
 
 
+def flush_langfuse() -> None:
+    """Force-flush buffered spans before a short-lived process (a Celery
+    task's worker child, which may be recycled via
+    celery_worker_max_tasks_per_child) exits — the batch exporter's
+    background thread does not guarantee delivery before that happens.
+    No-op when disabled. Call from a Celery task wrapper's `finally` block
+    (app/tasks/*.py), not from the traced_workflow-wrapped function itself —
+    HTTP-request-scoped workflows (chat, chapter content generation, custom
+    export clarify) run in the long-lived FastAPI process and don't need
+    this; only Celery-task-scoped workflows do."""
+    if not settings.langfuse_enabled:
+        return
+    from langfuse import get_client
+
+    get_client().flush()
+
+
 class _NoopWorkflow:
     def __enter__(self) -> None:
         return None
