@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from sqlalchemy.orm import Session
 
 from app.llm.factory import get_chat_model
+from app.llm.langfuse_client import traced_workflow
 from app.llm.prompts import CUSTOM_EXPORT_GENERATE_PROMPT
 from app.llm.retry import call_with_retry
 from app.models.course import Course
@@ -30,6 +31,13 @@ def _text_content(resp: AIMessage) -> str:
 
 
 def generate_custom_markdown(db: Session, course: Course, user_id: int, brief: str, plan: dict) -> str:
+    with traced_workflow(
+        "Custom Export Generate", user_id=user_id, session_id=course.id, tags=["custom-export"],
+    ):
+        return _generate_custom_markdown(db, course, user_id, brief, plan)
+
+
+def _generate_custom_markdown(db: Session, course: Course, user_id: int, brief: str, plan: dict) -> str:
     tools = build_export_tools(db, user_id, course.topic_slug)
     tools_by_name = {tool.name: tool for tool in tools}
     model = get_chat_model("custom_export_generate").bind_tools(tools)

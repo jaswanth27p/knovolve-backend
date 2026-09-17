@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from app.llm.factory import get_chat_model
+from app.llm.langfuse_client import traced_workflow
 from app.llm.prompts import CUSTOM_EXPORT_CLARIFY_PROMPT
 from app.llm.retry import call_with_retry
 from app.models.course import Course
@@ -85,6 +86,15 @@ def _parse_result(resp: AIMessage, model, messages: list[BaseMessage]) -> dict:
 
 
 def clarify_export(
+    db: Session, course: Course, user_id: int, message: str, history: list[ChatTurn],
+) -> dict:
+    with traced_workflow(
+        "Custom Export Clarify", user_id=user_id, session_id=course.id, tags=["custom-export"],
+    ):
+        return _clarify_export(db, course, user_id, message, history)
+
+
+def _clarify_export(
     db: Session, course: Course, user_id: int, message: str, history: list[ChatTurn],
 ) -> dict:
     tools = build_export_tools(db, user_id, course.topic_slug)

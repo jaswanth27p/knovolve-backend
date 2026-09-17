@@ -8,6 +8,7 @@ from app.agents.custom_export.generate import generate_custom_markdown
 from app.db import SessionLocal
 from app.documents import render
 from app.documents.render import markdown_to_html
+from app.llm.langfuse_client import flush_langfuse
 from app.models.course import Course
 from app.models.export import ExportJob
 from app.services import exports as export_service
@@ -80,3 +81,5 @@ def run_export_task(self: Task, export_id: int) -> None:
             job.completed_at = datetime.now(timezone.utc)
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
+        finally:
+            flush_langfuse()
