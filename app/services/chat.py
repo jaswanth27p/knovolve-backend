@@ -14,6 +14,7 @@ from langchain_core.tools import BaseTool
 from sqlalchemy.orm import Session
 
 from app.llm.factory import get_chat_model
+from app.llm.langfuse_client import traced_workflow
 from app.llm.prompts import CHAT_AGENT_SYSTEM_PROMPT
 from app.llm.retry import call_with_retry
 from app.schemas.chat import ChatRequest, ChatResponse, ChatTurn, LearnerContextBundle
@@ -108,17 +109,18 @@ def _build_agent(
 
 
 def answer_chat_message(db: Session, user_id: int, req: ChatRequest) -> ChatResponse:
-    bundle = req.context if req.context is not None else build_context_bundle(db, user_id, req.current_route)
-    model, messages, final = _build_agent(db, user_id, req, bundle)
-    # `final` is already the model's tool-free answer; only re-invoke when the
-    # round cap cut the loop short and we never got one.
-    resp: BaseMessage = final if final is not None else call_with_retry(model.invoke, messages)
-    content = resp.content
-    if not isinstance(content, str):
-        raise TypeError(f"expected str content from LLM response, got {type(content)}")
-    # The fallback re-invoke can itself come back with tool_calls and empty text.
-    reply = content.strip() or FALLBACK_REPLY
-    return ChatResponse(reply=reply, context=None if req.context is not None else bundle)
+    with traced_workflow("Chat Reply", user_id=user_id, tags=["chat"]):
+        bundle = req.context if req.context is not None else build_context_bundle(db, user_id, req.current_route)
+        model, messages, final = _build_agent(db, user_id, req, bundle)
+        # `final` is already the model's tool-free answer; only re-invoke when the
+        # round cap cut the loop short and we never got one.
+        resp: BaseMessage = final if final is not None else call_with_retry(model.invoke, messages)
+        content = resp.content
+        if not isinstance(content, str):
+            raise TypeError(f"expected str content from LLM response, got {type(content)}")
+        # The fallback re-invoke can itself come back with tool_calls and empty text.
+        reply = content.strip() or FALLBACK_REPLY
+        return ChatResponse(reply=reply, context=None if req.context is not None else bundle)
 
 
 def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator[dict]:
@@ -132,6 +134,11 @@ def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator
     # started streaming once we yield, so any failure from here on has to reach
     # the client as an `error` event, not escape the generator and truncate the
     # stream (this includes building the bundle on the first turn).
+    with traced_workflow("Chat Reply", user_id=user_id, tags=["chat", "streaming"]):
+        yield from _stream_chat_message(db, user_id, req)
+
+
+def _stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator[dict]:
     try:
         bundle = req.context if req.context is not None else build_context_bundle(db, user_id, req.current_route)
         if req.context is None:
