@@ -57,3 +57,26 @@ def test_plain_submit_without_wrapper_does_not_propagate():
         result = executor.submit(read_probe).result()
 
     assert result == "unset"
+
+
+def test_handler_is_singleton_when_enabled(monkeypatch):
+    """Verify that get_langfuse_handler() returns the same object on
+    repeated calls when langfuse_enabled=True, and CallbackHandler is
+    only constructed once. This exercises the _handler_built caching
+    logic that would silently break if refactored incorrectly."""
+    from unittest.mock import MagicMock, patch
+    import app.llm.langfuse_client as lc
+
+    monkeypatch.setattr(settings, "langfuse_enabled", True)
+    # Reset the global state to simulate a fresh import
+    monkeypatch.setattr(lc, "_handler_built", False)
+    monkeypatch.setattr(lc, "_handler", None)
+
+    fake_handler = MagicMock()
+    with patch("langfuse.langchain.CallbackHandler", return_value=fake_handler) as mock_ctor:
+        first = get_langfuse_handler()
+        second = get_langfuse_handler()
+
+        assert first is second, "Handler should be the same object on repeated calls"
+        assert first is fake_handler, "Handler should be the mocked instance"
+        mock_ctor.assert_called_once()
