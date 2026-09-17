@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.config import settings
+from app.llm.langfuse_client import run_with_current_context
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter, Module
@@ -184,16 +185,14 @@ def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
         drafts_by_section: list[tuple[int | None, list]] = []
         if sections:
             workers = max(1, min(settings.assignment_question_max_workers, len(sections)))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                drafts_list = list(
-                    executor.map(
-                        lambda section: generate_questions_for_section(
-                            chapter.title, chapter.objective,
-                            section.heading, section.body_markdown, section.examples,
-                        ),
-                        sections,
-                    )
+            traced_generate_for_section = run_with_current_context(
+                lambda section: generate_questions_for_section(
+                    chapter.title, chapter.objective,
+                    section.heading, section.body_markdown, section.examples,
                 )
+            )
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                drafts_list = list(executor.map(traced_generate_for_section, sections))
             drafts_by_section = [
                 (section.id, drafts) for section, drafts in zip(sections, drafts_list)
             ]
@@ -297,16 +296,14 @@ def generate_module_assignment(module_id: int, db: Session) -> None:
         if fresh_positions:
             jobs = [slots[i] for i in fresh_positions]
             workers = max(1, min(settings.assignment_question_max_workers, len(jobs)))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                results = list(
-                    executor.map(
-                        lambda slot: generate_questions_for_section(
-                            slot[2].title, slot[2].objective,
-                            slot[3].heading, slot[3].body_markdown, slot[3].examples,
-                        ),
-                        jobs,
-                    )
+            traced_generate_for_slot = run_with_current_context(
+                lambda slot: generate_questions_for_section(
+                    slot[2].title, slot[2].objective,
+                    slot[3].heading, slot[3].body_markdown, slot[3].examples,
                 )
+            )
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(executor.map(traced_generate_for_slot, jobs))
             fresh_results = dict(zip(fresh_positions, results))
 
         # Pass 3 (main thread): assemble in original order.
