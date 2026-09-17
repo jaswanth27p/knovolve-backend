@@ -15,6 +15,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.llm.factory import get_chat_model
+from app.llm.langfuse_client import traced_workflow
 from app.llm.prompts import EXTENSION_PLAN_PROMPT
 from app.llm.retry import call_with_retry
 from app.models.course import Chapter, Course, Module
@@ -89,6 +90,13 @@ def _parse_chapters(resp: AIMessage, invoke_fn, messages: list[BaseMessage]) -> 
 
 
 def plan_new_chapters(db: Session, course: Course, user_id: int, request_text: str) -> list[dict]:
+    with traced_workflow(
+        "Course Extension", user_id=user_id, session_id=course.id, tags=["course-extension"],
+    ):
+        return _plan_new_chapters(db, course, user_id, request_text)
+
+
+def _plan_new_chapters(db: Session, course: Course, user_id: int, request_text: str) -> list[dict]:
     read_tool = _build_tool(db, course, user_id)
     model = get_chat_model("extension_plan")
     bound = model.bind_tools([read_tool])

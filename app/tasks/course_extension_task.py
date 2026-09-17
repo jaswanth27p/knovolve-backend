@@ -12,6 +12,7 @@ from celery import Task
 
 from app.agents.course_extension.agent import plan_new_chapters
 from app.db import SessionLocal
+from app.llm.langfuse_client import flush_langfuse
 from app.models.course import Course
 from app.models.course_extension import CourseExtensionJob
 from app.services import course_extension
@@ -62,3 +63,5 @@ def run_course_extension_job(self: Task, job_id: int) -> None:
             job.error = GENERIC_JOB_ERROR
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
+        finally:
+            flush_langfuse()
