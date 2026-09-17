@@ -19,6 +19,7 @@ from app.agents.chapter_content.nodes.generate_section_outline import generate_s
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
 from app.agents.chapter_content.research import ensure_chapter_research
 from app.config import settings
+from app.llm.langfuse_client import run_with_current_context
 from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
@@ -165,9 +166,10 @@ def stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Itera
         # completion order — the client keys sections by `order` and sorts.
         max_workers = max(1, min(settings.chapter_section_max_workers, len(pending)))
         executor = ThreadPoolExecutor(max_workers=max_workers)
+        traced_generate_chapter_section = run_with_current_context(generate_chapter_section)
         futures = {
             executor.submit(
-                generate_chapter_section,
+                traced_generate_chapter_section,
                 chapter.title, chapter.objective, entry["heading"], entry["objective"],
                 entry["kind"], content.research_notes or FALLBACK_RESEARCH_NOTES,
             ): (i, entry)
