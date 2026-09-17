@@ -6,6 +6,7 @@ from celery.signals import after_setup_logger, after_setup_task_logger, worker_p
 
 from app.config import settings
 from app.db import engine as _db_engine
+from app.llm.langfuse_client import setup_langfuse
 from app.observability import attach_otlp_handler, instrument_static, setup_logging, setup_tracing
 import app.models  # noqa: F401  (registers every model on Base.metadata before any task runs)
 
@@ -35,6 +36,7 @@ def _bridge_celery_logger_to_otlp(logger=None, **_kwargs: object) -> None:
         attach_otlp_handler(logger)
 
 setup_tracing()
+setup_langfuse()
 setup_logging()
 
 celery_app = Celery("knovolve", broker=settings.redis_url, backend=settings.redis_url)

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import app.models  # noqa: F401  (registers every model on Base.metadata before any request runs)
 from app.auth.routes import router as auth_router
 from app.config import settings
+from app.llm.langfuse_client import setup_langfuse
 from app.observability import (
     instrument_fastapi,
     instrument_static,
@@ -21,6 +22,7 @@ from app.routes.me import router as me_router
 setup_tracing()
 setup_logging()
 setup_sentry()
+setup_langfuse()
 
 app = FastAPI(title="Knovolve")
 app.add_middleware(
