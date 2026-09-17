@@ -27,6 +27,7 @@ from app.models.chapter_content import ChapterContent
 from app.agents.evaluation.nodes.grade_assignment_answers import (
     FreeTextAnswerItem, KnownAnswerItem, grade_assignment_answers,
 )
+from app.llm.langfuse_client import traced_workflow
 from app.services import progression, streaks
 from app.tasks.chapter_content_tasks import remediate_chapter_task
 
@@ -61,6 +62,11 @@ def _dispatch_remediation(db: Session, attempt: AssignmentAttempt, assignment: A
 
 
 def grade_assignment_attempt(attempt_id: int, db: Session) -> None:
+    with traced_workflow("Assignment Grading", session_id=attempt_id, tags=["evaluation"]):
+        _grade_assignment_attempt(attempt_id, db)
+
+
+def _grade_assignment_attempt(attempt_id: int, db: Session) -> None:
     attempt = db.get(AssignmentAttempt, attempt_id)
     if attempt is None:
         raise ValueError(f"AssignmentAttempt {attempt_id} not found")
