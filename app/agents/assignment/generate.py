@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.llm.langfuse_client import run_with_current_context
+from app.llm.langfuse_client import run_with_current_context, traced_workflow
 from app.models.assignment import Assignment, AssignmentQuestion, AssignmentUserTopup
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter, Module
@@ -162,6 +162,13 @@ def _teaching_sections(db: Session, chapter_content_id: int) -> Sequence[Chapter
 
 
 def generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
+    with traced_workflow(
+        "Assignment Generation", session_id=chapter_content_id, tags=["assignment-generation", "chapter"],
+    ):
+        _generate_chapter_assignment(chapter_content_id, db)
+
+
+def _generate_chapter_assignment(chapter_content_id: int, db: Session) -> None:
     content = db.get(ChapterContent, chapter_content_id)
     if content is None:
         raise ValueError(f"ChapterContent {chapter_content_id} not found")
@@ -238,6 +245,13 @@ def _spread_by_concept(questions: Sequence[AssignmentQuestion], count: int) -> l
 
 
 def generate_module_assignment(module_id: int, db: Session) -> None:
+    with traced_workflow(
+        "Assignment Generation", session_id=module_id, tags=["assignment-generation", "module"],
+    ):
+        _generate_module_assignment(module_id, db)
+
+
+def _generate_module_assignment(module_id: int, db: Session) -> None:
     module = db.get(Module, module_id)
     if module is None:
         raise ValueError(f"Module {module_id} not found")
@@ -479,6 +493,13 @@ def generate_module_topup(assignment_id: int, user_id: int, db: Session) -> None
     TOPUP_QUESTION_COUNT questions targeting THIS user's weak concepts
     (app.services.mastery.get_weak_concept_tags). Never touches the shared
     base question set — every row this creates has user_id=user_id."""
+    with traced_workflow(
+        "Assignment Topup", user_id=user_id, session_id=assignment_id, tags=["assignment-topup"],
+    ):
+        _generate_module_topup(assignment_id, user_id, db)
+
+
+def _generate_module_topup(assignment_id: int, user_id: int, db: Session) -> None:
     topup, created = _get_or_create_topup(db, assignment_id, user_id)
     if not created and not _reactivate_topup_if_retryable(db, topup):
         return  # already ready/skipped, a healthy run is in flight, or we lost the race

@@ -22,6 +22,7 @@ from app.agents.assignment.generate import (
     generate_module_assignment,
     generate_module_topup,
 )
+from app.llm.langfuse_client import flush_langfuse
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ def generate_chapter_assignment_task(self: Task, chapter_content_id: int) -> Non
             generate_chapter_assignment(chapter_content_id, db)
         except Exception as exc:  # noqa: BLE001 - taxonomy above
             _retry_if_transient(self, exc)
+        finally:
+            flush_langfuse()
 
 
 @celery_app.task(bind=True, max_retries=MAX_CELERY_RETRIES,
@@ -75,6 +78,8 @@ def generate_module_assignment_task(self: Task, module_id: int) -> None:
             generate_module_assignment(module_id, db)
         except Exception as exc:  # noqa: BLE001 - taxonomy above
             _retry_if_transient(self, exc)
+        finally:
+            flush_langfuse()
 
 
 @celery_app.task(bind=True, max_retries=MAX_CELERY_RETRIES,
@@ -85,3 +90,5 @@ def generate_module_topup_task(self: Task, assignment_id: int, user_id: int) -> 
             generate_module_topup(assignment_id, user_id, db)
         except Exception as exc:  # noqa: BLE001 - taxonomy above
             _retry_if_transient(self, exc)
+        finally:
+            flush_langfuse()
