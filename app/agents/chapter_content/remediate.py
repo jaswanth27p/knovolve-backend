@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.agents.chapter_content.nodes.generate_remediation_outline import generate_remediation_outline
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
 from app.agents.chapter_content.research import ensure_chapter_research
+from app.llm.langfuse_client import traced_workflow
 from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
@@ -76,6 +77,15 @@ def _get_or_create_content(
 
 
 def remediate_chapter(
+    chapter_id: int, user_id: int, weak_concept_tags: list[str], source_attempt_id: int, db: Session,
+) -> None:
+    with traced_workflow(
+        "Chapter Remediation", user_id=user_id, session_id=source_attempt_id, tags=["chapter-remediation"],
+    ):
+        _remediate_chapter(chapter_id, user_id, weak_concept_tags, source_attempt_id, db)
+
+
+def _remediate_chapter(
     chapter_id: int, user_id: int, weak_concept_tags: list[str], source_attempt_id: int, db: Session,
 ) -> None:
     content = _get_or_create_content(chapter_id, user_id, source_attempt_id, weak_concept_tags, db)
