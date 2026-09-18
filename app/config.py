@@ -186,6 +186,17 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # Deliberate, and a real tradeoff. Without this, pydantic-settings
+        # defaults a legacy `class Config` block to extra="forbid", and the
+        # docker-compose-only secrets that share backend/.env with app config
+        # (LANGFUSE_SALT, LANGFUSE_ENCRYPTION_KEY, LANGFUSE_INIT_*, the
+        # per-container passwords — none of which are Settings fields) would
+        # each raise a ValidationError at import time. The cost is that a
+        # typo'd or renamed setting is now silently ignored project-wide
+        # instead of failing loudly. The alternative — splitting .env into a
+        # separate compose-only env file — was considered and rejected as more
+        # invasive than the safety it buys back; see
+        # docs/superpowers/specs/2026-09-18-langfuse-observability-design.md.
         extra = "ignore"
 
 
