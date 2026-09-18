@@ -1,5 +1,4 @@
 import uuid
-from typing import cast
 from pydantic import SecretStr
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from app.config import settings
@@ -34,25 +33,36 @@ def get_chat_model(node: str) -> ChatOpenAI:
     )
     handler = get_langfuse_handler()
     if handler is not None:
-        # .with_config(...) statically returns a generic
-        # Runnable[LanguageModelInput, AIMessage] per langchain-core's stubs,
-        # but at runtime it's a RunnableBinding whose __getattr__ delegates
-        # every attribute/method access — bind_tools, with_structured_output,
-        # openai_api_base, .config, everything — straight through to the
-        # wrapped ChatOpenAI instance (verified empirically). Declaring the
-        # return type as a ChatOpenAI | Runnable union instead of casting
-        # here would be "more honest" in isolation, but it erases
-        # ChatOpenAI-specific members from every one of this function's 41
-        # call sites project-wide (bind_tools/with_structured_output aren't
-        # defined on the generic Runnable base), which is a real regression,
-        # not just noise — confirmed via a full `pyright` run. This cast
-        # documents a structurally-verified runtime fact instead of
-        # silencing a real error, and keeps every existing call site's
-        # typing unchanged.
-        model = cast(
-            ChatOpenAI,
-            model.with_config({"callbacks": [handler], "metadata": {"langfuse_tags": [node]}}),
-        )
+        # NOT model.with_config({"callbacks": [handler], ...}) — that wraps
+        # `model` in a RunnableBinding, and RunnableBinding.__getattr__ only
+        # merges the wrapper's .config into delegated methods whose signature
+        # has a `config` parameter (see langchain_core.runnables.base:
+        # RunnableBinding.__getattr__). Neither bind_tools() nor
+        # with_structured_output() takes `config` — both are plain
+        # `return self.bind(...)` calls forwarded straight to the *inner*
+        # ChatOpenAI instance, so `self` inside them is the unwrapped model
+        # and the returned RunnableBinding gets a fresh, empty .config,
+        # silently dropping the callbacks/metadata set here. Every call site
+        # that does `get_chat_model(...).bind_tools(...)` or
+        # `.with_structured_output(...)` — chat, custom export, course
+        # extension, and effectively every generation node in course
+        # creation/chapter content/assignment/evaluation — would produce zero
+        # Langfuse spans despite `traced_workflow` being entered correctly.
+        # Verified empirically: live-server /me/chat, chapter content
+        # generation, and grep of with_structured_output's own source (also
+        # `self.bind(**kwargs)`) all reproduced the drop; a direct repro with
+        # `model.with_config(...)` then `.bind_tools(...)` produced zero
+        # captured spans in a patched LangfuseSpanProcessor exporter.
+        #
+        # callbacks/metadata/tags are native Pydantic fields on
+        # BaseChatModel (see langchain_core.language_models.chat_models),
+        # not RunnableBinding-only config. Setting them directly on the
+        # ChatOpenAI instance means `self` inside bind_tools()/
+        # with_structured_output() IS this already-configured instance, so
+        # every RunnableBinding they construct wraps a model that already
+        # carries the handler — confirmed empirically to survive both.
+        model.callbacks = [handler]
+        model.metadata = {"langfuse_tags": [node]}
     return model
 
 def _embeddings_client() -> OpenAIEmbeddings:
