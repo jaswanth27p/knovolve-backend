@@ -14,7 +14,7 @@ from langchain_core.tools import BaseTool
 from sqlalchemy.orm import Session
 
 from app.llm.factory import get_chat_model
-from app.llm.langfuse_client import traced_workflow
+from app.llm.langfuse_client import traced_workflow, traced_workflow_stream
 from app.llm.prompts import CHAT_AGENT_SYSTEM_PROMPT
 from app.llm.retry import call_with_retry
 from app.schemas.chat import ChatRequest, ChatResponse, ChatTurn, LearnerContextBundle
@@ -134,8 +134,16 @@ def stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator
     # started streaming once we yield, so any failure from here on has to reach
     # the client as an `error` event, not escape the generator and truncate the
     # stream (this includes building the bundle on the first turn).
-    with traced_workflow("Chat Reply", user_id=user_id, tags=["chat", "streaming"]):
-        yield from _stream_chat_message(db, user_id, req)
+    #
+    # `traced_workflow_stream` rather than `with traced_workflow(...): yield
+    # from ...`: StreamingResponse resumes this generator in a FRESH context
+    # copy per item, so a trace attached on the first resumption is gone by the
+    # second `next()` and every later LLM call (the tool-call rounds) would
+    # start its own orphan trace. See app/llm/langfuse_client.py.
+    return traced_workflow_stream(
+        _stream_chat_message(db, user_id, req),
+        "Chat Reply", user_id=user_id, tags=["chat", "streaming"],
+    )
 
 
 def _stream_chat_message(db: Session, user_id: int, req: ChatRequest) -> Iterator[dict]:

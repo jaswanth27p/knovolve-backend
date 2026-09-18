@@ -19,7 +19,7 @@ from app.agents.chapter_content.nodes.generate_section_outline import generate_s
 from app.agents.chapter_content.nodes.generate_chapter_section import generate_chapter_section
 from app.agents.chapter_content.research import ensure_chapter_research
 from app.config import settings
-from app.llm.langfuse_client import run_with_current_context, traced_workflow
+from app.llm.langfuse_client import run_with_current_context, traced_workflow_stream
 from app.llm.web_research import FALLBACK_RESEARCH_NOTES
 from app.models.chapter_content import ChapterContent, ChapterContentSection
 from app.models.course import Chapter
@@ -96,10 +96,17 @@ def _resolve_content_for_user(db: Session, chapter: Chapter, user_id: int) -> Ch
 
 
 def stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Iterator[dict]:
-    with traced_workflow(
-        "Chapter Content Generation", user_id=user_id, session_id=chapter.id, tags=["chapter-generation"],
-    ):
-        yield from _stream_chapter_content(chapter, db, user_id)
+    # `traced_workflow_stream`, not `with traced_workflow(...): yield from ...`
+    # — StreamingResponse resumes this generator in a fresh context copy per
+    # item, which drops a trace attached on the first resumption. Today all the
+    # LLM work here happens before the first yield so the plain shape would
+    # still work by accident; this keeps it correct if a progress event is ever
+    # yielded earlier. See app/llm/langfuse_client.py.
+    return traced_workflow_stream(
+        _stream_chapter_content(chapter, db, user_id),
+        "Chapter Content Generation", user_id=user_id, session_id=chapter.id,
+        tags=["chapter-generation"],
+    )
 
 
 def _stream_chapter_content(chapter: Chapter, db: Session, user_id: int) -> Iterator[dict]:
