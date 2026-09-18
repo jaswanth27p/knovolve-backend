@@ -104,11 +104,29 @@ def run_with_current_context(fn: Callable[P, T]) -> Callable[P, T]:
     this: a new OS thread starts with an empty Context, not the submitting
     thread's — the identical fix OTel's own thread-pool instrumentation
     needs. Call this on the submitting thread, right before `.submit()`/
-    `.map()`, so `copy_context()` captures the trace that's actually open."""
+    `.map()`, so `copy_context()` captures the trace that's actually open.
+
+    The returned wrapper must tolerate being invoked concurrently from
+    several worker threads at once (that's exactly what `executor.map(...)`
+    does when called with a single wrapped callable across many items) —
+    it does NOT re-run the captured `Context` object itself via
+    `ctx.run(...)`. `contextvars.Context.run()` is documented to raise
+    `RuntimeError: cannot enter context: ... is already entered` when the
+    SAME Context object is entered from more than one OS thread at once,
+    which one wrapped call sharing one `ctx` across a thread pool triggers
+    reliably. Instead, each invocation copies the captured vars' values onto
+    its own (per-thread) context via `ContextVar.set()`/`.reset()`, which is
+    safe to do concurrently since every thread has its own implicit
+    Context."""
     ctx = contextvars.copy_context()
 
     @functools.wraps(fn)
     def _wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
-        return ctx.run(fn, *args, **kwargs)
+        tokens = [(var, var.set(value)) for var, value in ctx.items()]
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            for var, token in reversed(tokens):
+                var.reset(token)
 
     return _wrapped

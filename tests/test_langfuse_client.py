@@ -49,6 +49,37 @@ def test_run_with_current_context_propagates_contextvar():
     assert result == "main-thread-value"
 
 
+def test_run_with_current_context_safe_under_concurrent_invocation():
+    """Regression test for a real bug found by Task 17's full-suite run:
+    when the SAME wrapped callable is invoked concurrently from several
+    worker threads at once (exactly what `ThreadPoolExecutor.map(wrapped,
+    items)` does — one `run_with_current_context(...)` call, many items),
+    the naive `ctx.run(fn, ...)` implementation raised `RuntimeError:
+    cannot enter context: ... is already entered`, because
+    contextvars.Context.run() is documented to disallow entering the same
+    Context object from more than one OS thread concurrently. This is what
+    app/agents/assignment/generate.py and
+    app/agents/chapter_content/generate.py actually do (one wrapped
+    function, executor.map over N sections/slots), so the bug was real and
+    reachable, not just theoretical."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    _probe.set("concurrent-value")
+
+    def read_probe(n: int) -> tuple[int, str]:
+        # Sleep so multiple worker threads are guaranteed to overlap inside
+        # the wrapped call at the same time, reproducing the race.
+        time.sleep(0.05)
+        return n, _probe.get()
+
+    wrapped = run_with_current_context(read_probe)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(wrapped, range(8)))
+
+    assert results == [(n, "concurrent-value") for n in range(8)]
+
+
 def test_plain_submit_without_wrapper_does_not_propagate():
     """Sanity check that the fix in the test above is actually doing
     something, not passing by accident."""
