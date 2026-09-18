@@ -78,6 +78,7 @@ services:
       - tempo
       - prometheus
   langfuse-postgres:
+    profiles: ["langfuse"]
     image: docker.io/postgres:17
     restart: always
     environment:
@@ -93,6 +94,7 @@ services:
       timeout: 3s
       retries: 10
   langfuse-clickhouse:
+    profiles: ["langfuse"]
     image: docker.io/clickhouse/clickhouse-server:25.12
     restart: always
     user: "101:101"
@@ -111,6 +113,7 @@ services:
       retries: 10
       start_period: 1s
   langfuse-redis:
+    profiles: ["langfuse"]
     image: docker.io/redis:7
     restart: always
     command: --requirepass ${LANGFUSE_REDIS_AUTH} --maxmemory-policy noeviction
@@ -123,6 +126,7 @@ services:
       timeout: 10s
       retries: 10
   langfuse-minio:
+    profiles: ["langfuse"]
     image: cgr.dev/chainguard/minio
     restart: always
     entrypoint: sh
@@ -140,6 +144,7 @@ services:
       retries: 5
       start_period: 1s
   langfuse-worker:
+    profiles: ["langfuse"]
     image: docker.langfuse.com/langfuse/langfuse-worker:4
     restart: always
     depends_on: &langfuse-depends-on
@@ -177,6 +182,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
   langfuse-web:
+    profiles: ["langfuse"]
     image: docker.langfuse.com/langfuse/langfuse:4
     restart: always
     depends_on: *langfuse-depends-on
